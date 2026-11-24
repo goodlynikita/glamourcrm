@@ -1,10 +1,10 @@
 const phrases={
-  stop:['не звоните','не звонить','не пишите','больше не связывайтесь','не связывайтесь','не хочу чтобы звонили','не хочу чтобы писали','не надо звонить','не надо мне звонить','без звонков','уберите номер','удалите мой номер'],
+  stop:['не звоните','не звонить','не перезванивайте','не перезванивать','не пишите','больше не связывайтесь','не связывайтесь','не хочу чтобы звонили','не хочу чтобы писали','не надо звонить','не надо мне звонить','без звонков','уберите номер','удалите мой номер'],
   quality:['не понравилось','плохо сделали','быстро отслоилось','не устроило','испортили','обидели','претензия'],
-  price:['дорого','цена','стоимость','бюджет','подешевле','скидка','денег','по цене','не по карману'],
+  price:['дорого','дороговато','цена','стоимость','бюджет','дешевле','подешевле','скидка','денег','по цене','не по карману'],
   time:['нет времени','не успеваю','работаю','некогда','график','позже','занята','занят','неудобное время'],
   location:['далеко','неудобно ехать','другой район','переехал','переехала','неудобно добираться','дорога'],
-  provider:['другой мастер','другому мастеру','к другому','нашла мастера','нашёл мастера','другой салон','уже запис'],
+  provider:['другой мастер','другого мастера','другому мастеру','к другому','нашла мастера','нашёл мастера','другой салон','уже записана','уже записан','уже записалась'],
   not_now:['не актуально','неактуально','не нужно','пока не требуется','пока не планирую'],
   unsure:['подумаю','думаю','сомневаюсь','не уверена','не уверен','не знаю','надо подумать']
 };
@@ -13,7 +13,7 @@ export const objections={
     ['confirm','Поняла, больше не будем связываться.','Зафиксировать запрет и закрыть контакт.','do_not_contact']
   ]},
   quality:{label:'Недовольство прошлым визитом',options:[
-    ['listen','Понимаю, что это неприятно. Расскажите, что именно вас не устроило, чтобы мы могли разобраться.','Уточнить детали и передать их руководителю.','thinking'],
+    ['listen','Понимаю, что это неприятно. Расскажите, что именно вас не устроило, чтобы мы могли разобраться.','Уточнить детали, передать их руководителю и согласовать время ответа.','callback'],
     ['review','Спасибо, что рассказали. Можно я уточню детали у руководителя и вернусь с конкретным решением?','Согласовать время ответа. Обещать компенсацию можно после согласования.','callback']
   ]},
   price:{label:'Стоимость или бюджет',options:[
@@ -45,10 +45,13 @@ export const objections={
     ['restate','Правильно понимаю, что вам важно сначала уточнить условия? Какие именно?','Пересказать своими словами и предложить проверяемый шаг.','contacted']
   ]}
 };
+const asksCallback=text=>/перезвонит[еь]|перезвони позже|наберите позже|наберите завтра/i.test(text);
 export function identifyObjection(text){
   const value=String(text).toLowerCase().replaceAll('ё','е').replace(/[^\p{L}\p{N} ]/gu,' ').replace(/\s+/g,' ').trim();
-  const score=words=>words.reduce((total,word)=>total+(value.includes(word.replaceAll('ё','е'))?word.split(' ').length:0),0);
+  const bounded=' '+value+' ';
+  const score=words=>words.reduce((total,word)=>total+(bounded.includes(' '+word.replaceAll('ё','е')+' ')?word.split(' ').length:0),0);
   if(score(phrases.stop))return 'stop';
+  if(asksCallback(value))return 'time';
   let best='other',highest=0;
   for(const [key,words] of Object.entries(phrases)){
     const found=score(words);
@@ -60,12 +63,95 @@ export function recommend(text,feedback=[],branch=''){
   const key=identifyObjection(text);
   const objection=objections[key];
   const rated=feedback.filter(vote=>vote.branch===branch&&vote.objection===key);
+  const explicitCallback=key==='time'&&asksCallback(text);
+  const callbackPriority=option=>Number(explicitCallback&&option.id==='callback');
   const options=objection.options.map(([id,reply,step,outcome])=>{
     const votes=rated.filter(vote=>vote.option===id);
     const useful=votes.filter(vote=>vote.helpful).length;
     return {id,reply,step,outcome,votes:votes.length,score:(useful+1)/(votes.length+2)};
-  }).sort((a,b)=>b.score-a.score);
+  }).sort((a,b)=>callbackPriority(b)-callbackPriority(a)||b.score-a.score);
   return {key,label:objection.label,options,votes:rated.length};
 }
+
+const firstContacts={
+  cancellation:{
+    goal:'Узнать, что помешало прийти, и предложить решение, если клиент ещё заинтересован.',
+    question:'Хотела уточнить, что помешало прийти в прошлый раз. Что могло бы сделать следующий визит удобнее?',
+    example:'По будням я работаю, неудобное время.'
+  },
+  regular:{
+    goal:'Выяснить, что изменилось, и понять, есть ли повод вернуться.',
+    question:'Вы раньше обращались к нам{service}. Хотела узнать, всё ли устраивало и чем мы можем помочь сейчас.',
+    example:'Я уже нашла другого мастера.'
+  },
+  single:{
+    goal:'Узнать, как прошёл первый визит, и выяснить, что важно для повторного.',
+    question:'После вашего первого визита хотела узнать, как всё прошло{experience}. Что хотелось бы изменить, если решите прийти снова?',
+    example:'Мне не понравилось, покрытие быстро отслоилось.'
+  },
+  inactive:{
+    goal:'Проверить, актуальна ли услуга, и уточнить, что мешает вернуться.',
+    question:'Вы раньше обращались к нам{service}. Подскажите, эта услуга вам сейчас актуальна?',
+    example:'Сейчас для меня это дорого.'
+  },
+  unknown:{
+    goal:'Уточнить историю, прежде чем предлагать услугу.',
+    question:'Уточняю данные по нашей студии. Подскажите, вы уже бывали у нас? Если да, нужна ли вам сейчас помощь с выбором услуги?',
+    example:'Не помню, пока не актуально.'
+  },
+  future:{
+    goal:'Уточнить вопрос по текущему обращению.',
+    question:'Подскажите, по вашему обращению в студию остались вопросы, с которыми я могу помочь?',
+    example:'Я пока не уверена, нужно подумать.'
+  },
+  manual:{
+    goal:'Уточнить, нужна ли помощь, и договориться об одном конкретном шаге.',
+    question:'Подскажите, планируете ли вы сейчас посетить студию и есть ли вопрос, с которым я могу помочь?',
+    example:'Мне нужно подумать.'
+  }
+};
+const followUps={
+  no_answer:{
+    goal:'Представиться и уточнить, удобно ли говорить.',
+    question:'Ранее я пыталась с вами связаться. Хотела уточнить, нужна ли вам сейчас помощь с услугами студии.',
+    example:'Сейчас занята, перезвоните позже.'
+  },
+  callback:{
+    goal:'Вернуться к вопросу, ради которого договорились о звонке.',
+    question:'Возвращаюсь к нашему разговору. Удобно сейчас обсудить ваш вопрос?',
+    example:'Не успеваю, у меня изменился график.'
+  },
+  thinking:{
+    goal:'Уточнить, что осталось непонятным, и дать клиенту самому решить.',
+    question:'В прошлый раз вы хотели подумать. Остались ли вопросы, которые я могу уточнить?',
+    example:'Я пока не уверена, слишком дорого.'
+  },
+  contacted:{
+    goal:'Вернуться с проверенным ответом на вопрос клиента.',
+    question:'Мы обсуждали услуги студии. Подскажите, ваш вопрос ещё актуален?',
+    example:'Мне неудобно добираться до этого филиала.'
+  }
+};
+const demoReplies={
+  c15:'Сейчас для меня это дорого.',
+  c1:'Мне не понравилось, покрытие быстро отслоилось.',
+  c9:'Мне неудобно добираться до вашего филиала.',
+  c16:'Мне нужно подумать.',
+  c2:'Я уже нашла другого мастера.',
+  c3:'По будням я работаю, неудобное время.'
+};
+export function contactBrief({client,reason,service='',previousResult='',followUp=false}){
+  const script=(followUp&&followUps[previousResult==='agreed'?'contacted':previousResult])||
+    (Object.hasOwn(firstContacts,reason)?firstContacts[reason]:firstContacts.manual);
+  const name=client.name.trim().split(/\s+/)[0];
+  const question=script.question.replace('{service}',service?' за услугой «'+service+'»':'')
+    .replace('{experience}',service?' с услугой «'+service+'»':'');
+  return {
+    goal:script.goal,
+    opening:'Здравствуйте, '+name+'! Это студия GLAMOUR. Удобно говорить? '+question,
+    example:client.source==='demo'?(followUp?null:demoReplies[client.id])||script.example:null
+  };
+}
+
 export const defaultAgent=()=>({auto:false,limit:10,feedback:[],lastRun:null});
 export const agentState=state=>state.agent??defaultAgent();

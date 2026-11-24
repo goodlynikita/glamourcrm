@@ -1,4 +1,4 @@
-import {agentState,identifyObjection,recommend} from './agent.mjs';
+import {agentState,contactBrief,identifyObjection,recommend} from './agent.mjs?v=7';
 import {contactGroups,contactTabs,nextContact} from './contact-desk.mjs';
 import {priorities,reasons,rulesFields,segmentKeys,terminalResults} from './retention.mjs';
 import {icon} from './icons.mjs';
@@ -169,10 +169,7 @@ function deskSelection(){
 function deskDraft(row){
   const key=[ui.profile,row.clientId,row.task?.id??''].join(':');
   if(!contactDrafts.has(key)){
-    const client=m.byClient(state,row.clientId);
-    const lastNote=m.clientHistory(state,client).find(event=>event.kind==='call'&&event.note)?.note;
-    const fromHistory=Boolean(lastNote&&identifyObjection(lastNote)!=='other');
-    contactDrafts.set(key,{objection:fromHistory?lastNote.slice(0,900):'',fromHistory,option:'',result:'',note:'',followUp:m.shiftDate(m.today(),1),followUpTime:'',
+    contactDrafts.set(key,{objection:'',option:'',result:'',note:'',followUp:m.shiftDate(m.today(),1),followUpTime:'',
       paidAmount:'',paidDate:m.today(),requestId:m.newId()});
   }
   return {key,values:contactDrafts.get(key)};
@@ -197,32 +194,59 @@ function deskHistory(client){
         (details.length?'<small>'+s(details.join(' · '))+'</small>':'')+(event.note?'<p>'+s(event.note)+'</p>':'')+'</div></li>';
     }).join('')+'</ol>':'<p class="desk-empty-history">Пока нет записей в истории.</p>')+'</section>';
 }
-function deskAgentSuggestion(client,draft){
-  if(!draft.objection.trim()){
-    const preparation={cancellation:'Спросите, что помешало прийти, и проверьте возможные даты для новой записи.',
-      regular:'Уточните, изменились ли пожелания по последней услуге, и предложите удобный следующий шаг.',
-      single:'Спросите, как прошёл первый визит и что можно сделать удобнее при повторной записи.',
-      inactive:'Уточните, актуальна ли сейчас услуга, и проверьте ближайшие варианты записи.'}[m.retentionReason(state,client)];
-    return preparation?'<p class="desk-empty-agent"><strong>Перед звонком</strong> · '+s(preparation)+'</p>':
-      '<p class="desk-empty-agent">Введите возражение, чтобы агент предложил ответ.</p>';
-  }
-  const suggestion=recommend(draft.objection,agentState(state).feedback,client.branch);
-  const option=suggestion.options.find(item=>item.id===draft.option)||suggestion.options[0];
-  const vote=agentState(state).feedback.find(item=>item.clientId===client.id&&item.objection===suggestion.key&&item.option===option.id);
-  const extra='data-key="'+suggestion.key+'" data-option="'+option.id+'"';
-  return '<div class="agent-suggestion"><div class="agent-suggestion-head"><div>'+tag(suggestion.label,suggestion.key==='stop'?'red':'berry')+'</div>'+
-    (suggestion.options.length>1?'<label class="sr-only" for="agent-option">Вариант ответа</label><select id="agent-option" aria-label="Вариант ответа" data-agent-option>'+
-      opts(suggestion.options.map((item,index)=>[item.id,'Вариант '+(index+1)]),option.id)+'</select>':'')+'</div>'+
-    '<div class="agent-response"><h3>Что ответить</h3><blockquote>'+s(option.reply)+'</blockquote><h3>Следующий шаг</h3><p>'+s(option.step)+'</p></div>'+
-    '<div class="agent-tools">'+button('Применить шаг',null,'secondary small','agent-step','data-id="'+option.outcome+'"')+
-    button(vote?.helpful===true?'Помогло ✓':'Помогло',null,'secondary small','agent-rate',extra+' data-helpful="true" aria-pressed="'+(vote?.helpful===true)+'"')+
-    button(vote?.helpful===false?'Не помогло ✓':'Не помогло',null,'secondary small','agent-rate',extra+' data-helpful="false" aria-pressed="'+(vote?.helpful===false)+'"')+'</div>'+
-    '<p class="agent-basis">'+(suggestion.votes?'Учтено отметок по этому возражению в филиале: '+m.number(suggestion.votes):'Отметьте результат, чтобы улучшить следующую подсказку.')+'</p></div>';
+function deskGuide(client,row,last,history){
+  const followUp=row.task?.reason==='followup';
+  const previous=followUp?history.find(event=>event.kind==='call'):null;
+  const reason=row.task?.originReason||m.retentionReason(state,client);
+  const guide=contactBrief({client,reason,service:last.service,previousResult:previous?.result,followUp});
+  const previousText=previous?.note?.trim();
+  const preview=previousText&&identifyObjection(previousText)!=='other'
+    ?{label:'Замечание из прошлого звонка',text:previousText.slice(0,900)}
+    :demoMode&&client.source==='demo'?{label:'Пример ответа в демо',text:guide.example}:null;
+  return {...guide,preview};
 }
-function deskAgentPanel(client,draft){
-  return '<section class="panel desk-panel desk-agent"><div class="panel-head"><div><h2>Помощник по возражениям</h2></div>'+iconBox('sparkle','berry')+'</div>'+
-    '<div class="desk-agent-inner">'+field(draft.fromHistory?'Из предыдущего контакта':'Что сказал клиент','<textarea rows="2" maxlength="900" id="agent-objection" placeholder="Например, мне дорого или неудобно по времени">'+
-      s(draft.objection)+'</textarea>')+'<div id="agent-suggestion" aria-live="polite">'+deskAgentSuggestion(client,draft)+'</div></div></section>';
+const quickResults=[
+  ['no_answer','Клиент не ответил','Укажите дату повторной попытки.'],
+  ['contacted','Есть интерес','Зафиксируйте вопрос клиента и согласованную дату контакта.'],
+  ['declined','Клиенту не актуально','Укажите причину, если она известна.'],
+  ['do_not_contact','Просит больше не звонить','Сохраните результат, чтобы исключить клиента из обзвона.']
+];
+const outcomeChecks={
+  contacted:'Если клиент подтвердил интерес к варианту.',
+  callback:'Если клиент согласовал день и время звонка.',
+  thinking:'Если клиент хочет подумать и согласен на повторный контакт.',
+  declined:'Если клиент отказался от продолжения разговора.',
+  do_not_contact:'Если клиент попросил больше с ним не связываться.'
+};
+function deskAgentSuggestion(client,draft,guide){
+  const actual=draft.objection.trim();
+  const preview=actual?null:guide.preview;
+  if(!actual&&!preview)return '';
+  const feedback=agentState(state).feedback;
+  const suggestion=recommend(actual||preview.text,feedback,client.branch);
+  const option=suggestion.options.find(item=>item.id===draft.option)||suggestion.options[0];
+  const vote=feedback.find(item=>item.clientId===client.id&&item.objection===suggestion.key&&item.option===option.id);
+  const extra='data-key="'+suggestion.key+'" data-option="'+option.id+'"';
+  return '<div class="agent-suggestion">'+(preview?'<p class="agent-example"><strong>'+s(preview.label)+'</strong><span>«'+s(preview.text)+'»</span></p>':'')+
+    '<div class="agent-suggestion-head">'+tag(suggestion.label,suggestion.key==='stop'?'red':'berry')+
+    (suggestion.options.length>1?'<label class="sr-only" for="agent-option">Вариант ответа</label><select id="agent-option" data-agent-option>'+
+      opts(suggestion.options.map((item,index)=>[item.id,'Вариант '+(index+1)]),option.id)+'</select>':'')+'</div>'+
+    '<div class="agent-response"><h3>Что ответить</h3><blockquote>'+s(option.reply)+'</blockquote><h3>Что сделать</h3><p>'+s(option.step)+'</p></div>'+
+    (preview?button('Клиент так ответил',null,'secondary small','agent-use-example'):
+      '<p class="agent-condition">'+s(outcomeChecks[option.outcome])+'</p><div class="agent-tools">'+
+      button('Выбрать «'+m.outcomes[option.outcome]+'»',null,'secondary small','agent-step','data-id="'+option.outcome+'" data-copy-objection')+
+      button(vote?.helpful===true?'Помогло ✓':'Помогло',null,'secondary small','agent-rate',extra+' data-helpful="true" aria-pressed="'+(vote?.helpful===true)+'"')+
+      button(vote?.helpful===false?'Не помогло ✓':'Не помогло',null,'secondary small','agent-rate',extra+' data-helpful="false" aria-pressed="'+(vote?.helpful===false)+'"')+'</div>')+'</div>';
+}
+function deskAgentPanel(client,draft,guide){
+  return '<section class="panel desk-panel desk-agent"><div class="panel-head"><h2>Подсказка агента</h2>'+iconBox('sparkle','berry')+'</div>'+
+    '<div class="desk-agent-inner"><div class="agent-plan"><p><strong>Цель звонка</strong><span>'+s(guide.goal)+'</span></p>'+
+    '<p><strong>С чего начать</strong><span>'+s(guide.opening)+'</span></p></div>'+
+    field('Что сказал клиент','<textarea rows="2" maxlength="900" id="agent-objection" placeholder="Например, дорого или неудобно по времени">'+
+      s(draft.objection)+'</textarea>')+'<div id="agent-suggestion" aria-live="polite">'+deskAgentSuggestion(client,draft,guide)+'</div>'+
+    '<details class="agent-next-actions"><summary>Что выбрать после звонка</summary><ul>'+quickResults.map(([result,label,detail])=>
+      '<li>'+button(label,null,'secondary small','agent-step','data-id="'+result+'"')+'<span>'+s(detail)+'</span></li>').join('')+'</ul></details>'+
+    '</div></section>';
 }
 function deskClientCard(row,index,rows){
   const client=m.byClient(state,row.clientId);
@@ -231,13 +255,15 @@ function deskClientCard(row,index,rows){
   const last=m.lastKnownVisit(state,client);
   const future=m.retentionReason(state,client)==='future';
   const excluded=client.callBlocked||client.invalidPhone;
+  const history=m.clientHistory(state,client);
+  const latest=history.find(event=>event.kind==='payment');
   const callable=!excluded&&!(!row.task&&future)&&Boolean(row.assignee&&client.phone);
   const reason=row.task?.originReason||row.task?.reason||m.retentionReason(state,client);
   const title=row.task?.title||workSteps[reason]||'Связаться с клиентом';
   const owner=m.byPerson(row.assignee)?.name;
   const estimate=auditView().rows.find(entry=>entry.client.id===client.id);
   const status=row.task?.status||'';
-  const latest=m.clientHistory(state,client).find(event=>event.kind==='payment');
+  const guide=callable?deskGuide(client,row,last,history):null;
   const when=row.due?[m.longDate(row.due),row.task?.dueTime].filter(Boolean).join(' · '):'Без срока';
   const canAdvance=index>=0&&rows.length>1;
   const fill=draft;
@@ -260,9 +286,10 @@ function deskClientCard(row,index,rows){
     '<div class="desk-reason"><div class="desk-kicker">Причина контакта</div><strong>'+s(reasonTitle(reason))+'</strong><p>'+s(workSteps[reason]||title)+'</p>'+
     '<div class="desk-task-meta">'+icon('clock',16)+s(when)+(owner?'<span>'+s(owner)+'</span>':'')+(status?badge(status):'')+'</div></div>'+
     (row.task?.note?'<p class="desk-task-note">'+s(row.task.note)+'</p>':'')+'</section>'+
-    '<section class="panel desk-panel desk-result"><div class="panel-head"><h2>Результат контакта</h2>'+iconBox('checkList','pink')+'</div>'+
-    (callable?form:'<p class="desk-empty-agent">'+s(excluded?'Клиент исключён из контактов.':future?'У клиента есть будущая запись.':'Нет номера телефона или ответственного.')+'</p>')+'</section></div>'+
-    '<aside class="desk-column">'+(callable?deskAgentPanel(client,draft):'')+'<section class="panel desk-panel"><div class="panel-head"><h2>О клиенте</h2>'+
+    (guide?deskAgentPanel(client,draft,guide):'')+'</div>'+
+    '<aside class="desk-column"><section class="panel desk-panel desk-result"><div class="panel-head"><h2>Результат контакта</h2>'+iconBox('checkList','pink')+'</div>'+
+    (callable?form:'<p class="desk-empty-agent">'+s(excluded?'Клиент исключён из контактов.':future?'У клиента есть будущая запись.':'Нет номера телефона или ответственного.')+'</p>')+'</section>'+
+    '<section class="panel desk-panel"><div class="panel-head"><h2>О клиенте</h2>'+
     button('Полная карточка',null,'secondary small','client','data-id="'+s(client.id)+'"')+'</div>'+
     '<dl class="desk-facts">'+deskFact('Последний визит',last.lastVisit?m.longDate(last.lastVisit):'Нет данных')+
     deskFact('Визитов по выгрузке',client.visitCount)+deskFact('Последняя услуга',last.service||'—')+
@@ -342,13 +369,33 @@ function rememberDeskField(field){
 function refreshAgentSuggestion(){
   const panel=document.querySelector('#agent-suggestion');
   const {row}=deskSelection();
-  if(panel&&row)panel.innerHTML=deskAgentSuggestion(m.byClient(state,row.clientId),deskDraft(row).values);
+  if(panel&&row){
+    const client=m.byClient(state,row.clientId);
+    panel.innerHTML=deskAgentSuggestion(client,deskDraft(row).values,deskGuide(client,row,m.lastKnownVisit(state,client),m.clientHistory(state,client)));
+  }
 }
-function applyAgentStep(result){
+function useAgentExample(){
+  const field=document.querySelector('#agent-objection');
+  const {row}=deskSelection();
+  if(!field||!row||contactSaving)return;
+  const client=m.byClient(state,row.clientId);
+  const guide=deskGuide(client,row,m.lastKnownVisit(state,client),m.clientHistory(state,client));
+  if(!guide.preview)return;
+  field.value=guide.preview.text;
+  const draft=deskDraft(row).values;
+  draft.objection=field.value;
+  refreshAgentSuggestion();
+  field.focus();
+}
+function applyAgentStep(result,copyObjection){
   const form=document.querySelector('#desk-contact-form');
   if(!form||!Object.hasOwn(m.outcomes,result)||contactSaving)return;
   form.elements.result.value=result;
   rememberDeskField(form.elements.result);
+  if(copyObjection&&!form.elements.note.value.trim()){
+    form.elements.note.value=document.querySelector('#agent-objection').value.trim();
+    rememberDeskField(form.elements.note);
+  }
   toggleOutcome(form);
   form.elements.result.focus();
   form.elements.result.scrollIntoView?.({block:'nearest'});
@@ -897,7 +944,8 @@ document.addEventListener('click',event=>{
     case 'desk-tab': selectDeskTab(id);break;
     case 'desk-move': moveDesk(id);break;
     case 'copy-desk-phone': void copyDeskPhone(id);break;
-    case 'agent-step': applyAgentStep(id);break;
+    case 'agent-step': applyAgentStep(id,element.hasAttribute('data-copy-objection'));break;
+    case 'agent-use-example': useAgentExample();break;
     case 'agent-rate': void rateAgent(element);break;
     case 'run-agent': void runAgentNow(element);break;
     case 'quick-search': quickSearch();break;
