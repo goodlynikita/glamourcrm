@@ -13,6 +13,7 @@ export function visibleState(state,person){
   const settings=settingsFor(state);
   return {...state,clients,
     tasks:state.tasks.filter(task=>ids.has(task.clientId)),
+    recoveries:(state.recoveries??[]).filter(entry=>ids.has(entry.clientId)),
     opportunities:state.opportunities.filter(deal=>ids.has(deal.clientId)),imports:[],
     agent:{...state.agent,lastRun:null,feedback:state.agent.feedback.filter(item=>allowed.has(item.branch))},
     settings:{rules:settings.rules,branches:settings.branches.filter(branch=>allowed.has(branch.id)),

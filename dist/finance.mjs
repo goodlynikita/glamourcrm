@@ -3,6 +3,7 @@ export const stages={
   interested:{label:'Есть интерес',tone:'pink',next:'booked',action:'Предложить время'},
   booked:{label:'Записан',tone:'amber',next:'paid',action:'Отметить визит и оплату'},
   paid:{label:'Оплачено',tone:'green'},
+  recovered:{label:'Возврат подтверждён',tone:'green'},
   lost:{label:'Закрыто без визита',tone:'red'}
 };
 export const isOpen=deal=>Boolean(stages[deal.stage]?.next);

@@ -1,3 +1,4 @@
+import {moneyAudit} from './money-audit.mjs';
 import {agentState,defaultAgent,objections} from './agent.mjs';
 import {analyze,blockedResults,cleanImport,defaultRules,createImportIndex,importChanges,inWork,priorityFor,reasons,rulesFields,segmentKeys,terminalResults} from './retention.mjs';
 import {isOpen,parseMoney,releaseBooking,seedDeals,selectDeals,syncBooking,validDate,writeDeal} from './finance.mjs';
@@ -25,13 +26,14 @@ export const statuses = {
   done:{label:'Выполнена',tone:'green'}
 };
 export const outcomes = {
+  paid:'Вернулся и оплатил',
   booked:'Записан повторно',
   no_answer:'Не дозвонились',
   thinking:'Клиент думает',
   callback:'Перезвонить позже',
   declined:'Не заинтересован',
-  contacted:'Заинтересован в записи',
-  agreed:'Согласился записаться',
+  contacted:'Есть интерес',
+  agreed:'Готов вернуться',
   invalid_number:'Неактуальный номер',
   do_not_contact:'Просит больше не связываться'
 };
@@ -129,10 +131,12 @@ export function seed(day=today(),empty=false){
     agent:defaultAgent(),
     settings:structuredClone(settingsFor({})),
     opportunities:empty?[]:seedDeals(day,shiftDate),
+    recoveries:[],
     clients:empty?[]:clientsSeed.map(([name,branch,age,service],index)=>({
       id:'c'+(index+1),name,branch,phone:'7000000'+String(index+1).padStart(4,'0'),
       registered:shiftDate(day,-300-index*3),lastVisit:age===null?'':shiftDate(day,-age),
       service,source:'demo',history:[],
+      ...(age!==null&&index%5!==0?{meanCheck:[185000,240000,320000,275000,420000,195000,350000][index%7]}:{}),
       visitCount:age===null?null:[1,4,1,3,0,2][index%6]||5,
       ...(index===24?{lastCancellation:shiftDate(day,-8),cancelCount:1}:{}),
       ...(index===25?{visitCount:1}:{}),
@@ -201,6 +205,9 @@ export function clientHistory(state,client){
   const payments=state.opportunities.filter(deal=>deal.clientId===client.id&&deal.stage==='paid').map(deal=>({
     kind:'payment',date:deal.paymentDate,assignee:deal.assignee,amount:deal.actual,service:deal.service,visitDate:deal.visitDate
   }));
+  for(const payment of state.recoveries??[]){
+    if(payment.clientId===client.id)payments.push({...payment,kind:'payment'});
+  }
   const canceled=[...new Set([...(client.cancellations??[]),client.lastCancellation].filter(Boolean))].map(date=>({kind:'visit',date,title:'Отмена записи по выгрузке'}));
   return [...client.history,...calls,...payments,...visits,...canceled].sort((a,b)=>b.date.localeCompare(a.date));
 }
@@ -242,7 +249,7 @@ function outreachTask(clientId,assignee,due,day,{title='Предложить п�
 
 function planNextContact(state,client,values,day,task){
   const deal=state.opportunities.find(item=>item.clientId===client.id&&isOpen(item));
-  if(values.result==='booked')return;
+  if(values.result==='booked'||values.result==='paid')return;
   const stop=blockedResults.has(values.result);
   const declined=values.result==='declined';
   if(stop||declined){
@@ -277,7 +284,15 @@ function agentCycle(state,day,onlyBranch=''){
   const config=agentState(state);
   const directory=settingsFor(state);
   const branches=[];
+  const audit=moneyAudit(state,{branch:onlyBranch,day});
   let assigned=0;
+  const byBranch=new Map();
+  for(const row of audit.rows){
+    if(!row.contactable||row.working||row.paused)continue;
+    const branch=row.client.branch;
+    if(!byBranch.has(branch))byBranch.set(branch,[]);
+    byBranch.get(branch).push(row);
+  }
   for(const branch of directory.branches){
     if(onlyBranch&&onlyBranch!==branch.id)continue;
     const staff=directory.users.filter(person=>assignedBranches(person).includes(branch.id));
@@ -286,20 +301,16 @@ function agentCycle(state,day,onlyBranch=''){
     const already=state.tasks.filter(task=>task.source==='agent'&&task.created===day&&clientIds.has(task.clientId)).length;
     const remaining=Math.max(0,config.limit-already);
     if(!remaining)continue;
-    const cooldown=shiftDate(day,-30);
-    const recent=new Set(state.tasks.filter(task=>task.status==='done'&&task.closed>cooldown).map(task=>task.clientId));
-    const candidates=availableForContact(state,branch.id).filter(client=>!recent.has(client.id)&&
-      !client.history.some(event=>event.kind==='call'&&event.date>cooldown));
-    const ranked=candidates.map((client,index)=>{
-      const reason=retentionReason(state,client,day);
-      return {id:client.id,index,reason,priority:priorityFor(reason,dateDiff(day,lastKnownVisit(state,client).lastVisit),directory.rules)};
-    }).sort((a,b)=>Number(b.priority==='high')-Number(a.priority==='high')||a.index-b.index).slice(0,remaining);
+    const candidates=byBranch.get(branch.id)??[];
+    const ranked=candidates.map(({client,reason,lastVisit,amount})=>({
+      id:client.id,reason,amount,priority:priorityFor(reason,dateDiff(day,lastVisit),directory.rules)
+    })).sort((a,b)=>(b.amount??0)-(a.amount??0)||Number(b.priority==='high')-Number(a.priority==='high')).slice(0,remaining);
     if(!ranked.length)continue;
     const load=new Map(staff.map(person=>[person.id,state.tasks.filter(task=>task.assignee===person.id&&task.status!=='done').length]));
     for(const candidate of ranked){
       const person=staff.reduce((least,next)=>load.get(next.id)<load.get(least.id)?next:least);
       const task=outreachTask(candidate.id,person.id,shiftDate(day,directory.rules.taskDays),day,
-        {reason:candidate.reason,priority:candidate.priority});
+        {reason:candidate.reason,priority:candidate.priority,title:'Связаться по возврату клиента'});
       task.source='agent';
       task.activity[0].title='Задача создана агентом';
       state.tasks.push(task);
@@ -314,9 +325,10 @@ function agentCycle(state,day,onlyBranch=''){
 
 export function upgradeState(state){
   if(Array.isArray(state.opportunities)){
-    return state.settings&&state.agent?state:{...state,version:4,settings:structuredClone(settingsFor(state)),agent:state.agent??defaultAgent()};
+    if(state.settings&&state.agent&&Array.isArray(state.recoveries))return state;
+    return {...state,version:4,settings:structuredClone(settingsFor(state)),agent:state.agent??defaultAgent(),recoveries:state.recoveries??[]};
   }
-  const next={...state,version:4,settings:structuredClone(settingsFor(state)),agent:defaultAgent(),opportunities:[]};
+  const next={...state,version:4,settings:structuredClone(settingsFor(state)),agent:defaultAgent(),opportunities:[],recoveries:[]};
   const bookings=[];
   for(const task of state.tasks){
     if(task.result==='booked'&&task.appointment)bookings.push({event:task,clientId:task.clientId,reference:'task:'+task.id,date:task.closed});
@@ -361,12 +373,39 @@ export function applyCommand(state,command,fromContact=false){
       const client=byClient(next,clientId);
       const task=taskId?next.tasks.find(item=>item.id===taskId):null;
       if(!client||!validAssignee(next,values.assignee,client?.branch)||!Object.hasOwn(outcomes,values.result))throw new Error('Выберите результат контакта.');
-      if(client.callBlocked||client.invalidPhone)throw Error('Клиент исключён из контактов.');
+      let recovered;
+      if(values.result==='paid'){
+        const amount=parseMoney(values.paidAmount);
+        const date=values.paidDate;
+        const requestId=values.requestId;
+        if(typeof requestId!=='string'||!/^[-a-zA-Z0-9]{8,100}$/.test(requestId)||!amount||!validDate(date)||date>day){
+          throw Error('Укажите фактическую сумму и дату оплаты.');
+        }
+        const existing=next.recoveries.find(entry=>entry.clientId===clientId&&entry.requestId===requestId&&entry.assignee===values.assignee);
+        if(existing)return {next,value:{recorded:true}};
+        if(next.recoveries.some(entry=>entry.clientId===clientId&&entry.date===date&&entry.amount===amount)||
+          next.opportunities.some(deal=>deal.clientId===clientId&&deal.stage==='paid'&&deal.paymentDate===date&&deal.actual===amount)){
+          throw Error('Такая же оплата уже есть в истории этого клиента.');
+        }
+        recovered={id:newId(),clientId,assignee:values.assignee,amount,date,requestId,note:String(values.note??'').trim().slice(0,1200)};
+      }
+      if(!recovered&&(client.callBlocked||client.invalidPhone))throw Error('Клиент исключён из контактов.');
       if(taskId&&(!task||task.clientId!==clientId||task.status==='done'))throw new Error('Задача уже закрыта. Откройте очередь заново.');
       const needsDate=!terminalResults.has(values.result);
       if(needsDate&&(!validDate(values.followUp)||values.followUp<day||!validTime(values.followUpTime)||values.result==='callback'&&!values.followUpTime))throw new Error('Укажите дату следующего контакта.');
       const event={assignee:values.assignee,result:values.result,note:values.note??'',service:values.service??'',
         appointment:values.appointment,visitTime:values.visitTime,plannedInput:values.plannedInput,followUp:values.followUp,followUpTime:values.followUpTime};
+      if(recovered){
+        next.recoveries.push(recovered);
+        for(const deal of next.opportunities.filter(item=>item.clientId===clientId&&isOpen(item))){
+          Object.assign(deal,{stage:'recovered',closed:day,updated:day});
+        }
+        for(const pending of next.tasks.filter(item=>item.clientId===clientId&&item.status!=='done')){
+          Object.assign(pending,{status:'done',closed:day,result:'paid',systemClosed:true,
+            activity:[...(pending.activity??[]),{date:day,actor:command.actor||values.assignee,title:'Возврат и оплата подтверждены'}]});
+        }
+        return {next,value:{recorded:true}};
+      }
       next=applyCommand(next,task?{type:'save-task',task:{...task,...event,status:'done'},actor:command.actor}:
         {type:'log-call',clientId,event},true).next;
       planNextContact(next,byClient(next,clientId),event,day,task);
@@ -380,11 +419,12 @@ export function applyCommand(state,command,fromContact=false){
         !['focus',...segmentKeys].includes(group)||![10,25,50].includes(count)){
         throw new Error('Проверьте филиал, ответственного и дату.');
       }
-      const clients=availableForContact(next,branch,group).slice(0,count);
+      const clients=moneyAudit(next,{branch,day}).rows.filter(row=>row.contactable&&!row.working&&!row.paused&&(group==='focus'||row.reason===group))
+        .slice(0,count).map(row=>row.client);
       for(const client of clients){
         const reason=retentionReason(next,client,day);
         next.tasks.push(outreachTask(client.id,assignee,deadline,day,{reason,
-          priority:priorityFor(reason,dateDiff(day,lastKnownVisit(next,client).lastVisit),rules),actor:command.actor}));
+          priority:priorityFor(reason,dateDiff(day,lastKnownVisit(next,client).lastVisit),rules),actor:command.actor,title:'Связаться по возврату клиента'}));
       }
       return {next,value:{assigned:clients.length}};
     }
@@ -415,6 +455,7 @@ export function applyCommand(state,command,fromContact=false){
       if(status!=='done'&&next.tasks.some(task=>task.id!==id&&task.clientId===clientId&&task.status!=='done'&&(task.reason||'manual')===reason)){
         throw Error('У клиента уже есть активная задача по этой причине.');
       }
+      if(status==='done'&&result==='paid'&&old?.result!=='paid')throw Error('Подтвердите оплату в карточке контакта.');
       if(status==='done' && !Object.hasOwn(outcomes,result)) throw new Error('Выберите результат звонка.');
       if(status==='done' && result==='booked' && !validDate(appointment)) throw new Error('Укажите дату повторной записи.');
       const closed=status==='done'?(old?.closed||day):'';

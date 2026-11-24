@@ -31,13 +31,14 @@ test('CSV and Excel mapping preserve unknown fields and check repeat imports',as
   const XLSX=require('../dist/assets/xlsx.full.min.js');
   const workbook=XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(workbook,XLSX.utils.aoa_to_sheet([
-    ['Имя клиента','ID клиента','Филиал','Количество визитов','Последний визит'],
-    ['Лина Летняя','lina-1','Север',1,45000]
+    ['Имя клиента','ID клиента','Филиал','Количество визитов','Последний визит','Средний чек'],
+    ['Лина Летняя','lina-1','Север',1,45000,2325.5]
   ]),'Клиенты');
   const excel=await readFile(new File([XLSX.write(workbook,{type:'array',bookType:'xlsx'})],'демо.xlsx'),XLSX);
   const parsed=previewRows(excel.rows,[],'center',excel);
   assert.equal(parsed.records[0].lastVisit,'2023-03-15');
   assert.equal(parsed.records[0].visitCount,1);
+  assert.equal(parsed.records[0].meanCheck,232550);
   assert.equal(previewRows(excel.rows,[{...parsed.records[0],id:'existing'}],'center',excel).duplicates,1);
   const bad=previewRows(parseCsv('ФИО;Телефон\nТест;+79161234567'),[],'center',{demoOnly:true});
   assert.equal(bad.issues.length,1);
@@ -48,7 +49,7 @@ test('CSV and Excel mapping preserve unknown fields and check repeat imports',as
 
 async function startServer(file){
   const child=spawn(process.execPath,['server/index.mjs','--demo'],{cwd:new URL('../',import.meta.url),
-    env:{...process.env,PORT:'0',GLAMOUR_DB:file,GLAMOUR_HOST:'127.0.0.1',GLAMOUR_HTTPS:'0'},stdio:['ignore','pipe','pipe']});
+    env:{...process.env,PORT:'0',GLAMOUR_DB:file,GLAMOUR_HOST:'127.0.0.1',GLAMOUR_HTTPS:'0',GLAMOUR_AI_KEY:''},stdio:['ignore','pipe','pipe']});
   const origin=await new Promise((resolve,reject)=>{
     const stop=setTimeout(()=>{child.kill();reject(Error('Сервер не запустился.'));},8000);
     child.once('error',error=>{clearTimeout(stop);reject(error);});
@@ -90,6 +91,8 @@ test('authorized server workflow with branch isolation, retention report, and pe
     const manager=await login('manager');
     const staff=await login('alina');
     const send=(session,values)=>api('commands',{session,values});
+    assert.equal((await api('analysis',{session:staff,values:{branch:''}})).status,403);
+    assert.equal((await api('analysis',{session:manager,values:{branch:''}})).status,503);
     assert.equal((await send(staff,{type:'import-clients',clients:fixture})).status,403);
     const imported=await send(manager,{type:'import-clients',filename:'тест.csv',clients:fixture});
     assert.equal(imported.status,200);
@@ -146,6 +149,11 @@ test('authorized server workflow with branch isolation, retention report, and pe
     assert.equal(retentionReason(confirmation.data.state,confirmation.data.state.clients.find(item=>item.id===cancelled.id)),'future');
     assert.equal(retentionReport(confirmation.data.state,{reason:'cancellation',branch:'south'}).booked,1);
 
+    const paid=await send(sofia,{type:'record-contact',clientId:cancelled.id,
+      values:{assignee:'sofia',result:'paid',paidAmount:'2 825,50',paidDate:day,requestId:'persisted-recovery'}});
+    assert.equal(paid.status,200);
+    assert.equal(paid.data.state.recoveries[0].amount,282550);
+    assert.deepEqual((await api('state',{session:staff})).data.recoveries,[]);
     const cfg=settingsFor(refresh.data.state);
     const settings={rules:{...cfg.rules,singleDays:50},branches:Object.fromEntries(cfg.branches.map(b=>[b.id,b.name])),
       users:Object.fromEntries(cfg.users.filter(p=>p.branch).map(p=>[p.id,{name:p.name,branches:[p.branch],role:'admin'}])),newBranch:'Кирова'};
@@ -158,6 +166,7 @@ test('authorized server workflow with branch isolation, retention report, and pe
     const reopened=(await api('state',{session:manager})).data;
     assert.equal(reopened.clients.find(item=>item.id===first.id).name,'Сима Листова-Весенняя');
     assert(reopened.clients.some(client=>client.id===cancelled.id));
+    assert.equal(reopened.recoveries.find(entry=>entry.clientId===cancelled.id).amount,282550);
     assert(reopened.settings.branches.some(branch=>branch.name==='Кирова'));
     const reset=await send(manager,{type:'reset-demo'});
     assert(reset.data.value.reset);

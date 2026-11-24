@@ -5,10 +5,15 @@ import {createReadStream} from 'node:fs';
 import {stat,readFile,mkdir} from 'node:fs/promises';
 import {resolve,dirname,extname,sep} from 'node:path';
 import {fileURLToPath} from 'node:url';
-import {applyCommand,byPerson,seed,today,upgradeState} from '../dist/model.mjs';
+import {applyCommand,byBranch,byPerson,seed,today,upgradeState} from '../dist/model.mjs';
+import {analysisInput,askForAnalysis} from './ai.mjs';
 import {commandFor,RequestError,visibleState} from './access.mjs';
 
 const demo=process.argv.includes('--demo');
+const aiKey=process.env.GLAMOUR_AI_KEY?.trim();
+const aiModel=process.env.GLAMOUR_AI_MODEL?.trim()||'gpt-4.1-mini';
+const recentAnalysis=new Map();
+let aiRunning=false;
 const host=process.env.GLAMOUR_HOST||'127.0.0.1';
 const port=Number(process.env.PORT||8787);
 const secure=process.env.GLAMOUR_HTTPS==='1';
@@ -100,7 +105,8 @@ function loginLimit(req){
 async function api(req,res,url){
   if(url.pathname==='/api/session'&&req.method==='GET'){
     const id=identity(req);
-    return json(res,200,{user:id?byPerson(id,state()):null,demo});
+    const user=id?byPerson(id,state()):null;
+    return json(res,200,{user,demo,ai:Boolean(aiKey&&user&&!user.branch)});
   }
   if(req.method==='POST')sameOrigin(req);
   if(url.pathname==='/api/login'&&req.method==='POST'){
@@ -119,7 +125,8 @@ async function api(req,res,url){
     const token=randomBytes(32).toString('base64url');
     addSession.run(hash(token),user,Date.now()+sessionAge);
     res.setHeader('Set-Cookie',cookie(token,sessionAge/1000));
-    return json(res,200,{user:byPerson(user,state()),demo});
+    const account=byPerson(user,state());
+    return json(res,200,{user:account,demo,ai:Boolean(aiKey&&account&&!account.branch)});
   }
   const id=identity(req);
   if(!id)throw new RequestError(401,'Войдите в систему.');
@@ -131,6 +138,27 @@ async function api(req,res,url){
   if(url.pathname==='/api/state'&&req.method==='GET'){
     const snapshot=state();
     return json(res,200,visibleState(snapshot,byPerson(id,snapshot)));
+  }
+  if(url.pathname==='/api/analysis'&&req.method==='POST'){
+    const snapshot=state();
+    const person=byPerson(id,snapshot);
+    if(!person||person.branch)throw new RequestError(403,'Анализ доступен руководителю.');
+    if(!aiKey)throw new RequestError(503,'ИИ на сервере ещё не подключён.');
+    const {branch}=await body(req,2048)??{};
+    if(typeof branch!=='string'||(branch&&!byBranch(branch,snapshot)))throw new RequestError(400,'Выберите филиал.');
+    const input=analysisInput(snapshot,{branch,day:today()});
+    const signature=JSON.stringify(input);
+    const prior=recentAnalysis.get(branch);
+    if(prior?.signature===signature&&prior.expires>Date.now())return json(res,200,{analysis:prior.analysis});
+    if(aiRunning)throw new RequestError(429,'Другой анализ ещё выполняется. Повторите через минуту.');
+    aiRunning=true;
+    try{
+      const analysis=await askForAnalysis(input,{key:aiKey,model:aiModel});
+      recentAnalysis.set(branch,{signature,analysis,expires:Date.now()+60000});
+      return json(res,200,{analysis});
+    }catch{
+      throw new RequestError(502,'Сервис ИИ временно недоступен. Денежные показатели уже рассчитаны.');
+    }finally{aiRunning=false;}
   }
   if(url.pathname==='/api/commands'&&req.method==='POST'){
     const input=await body(req);
