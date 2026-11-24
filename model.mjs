@@ -1,6 +1,6 @@
-import {moneyAudit} from './money-audit.mjs';
-import {agentState,defaultAgent,objections} from './agent.mjs';
-import {analyze,blockedResults,cleanImport,defaultRules,createImportIndex,importChanges,inWork,priorityFor,reasons,rulesFields,segmentKeys,terminalResults} from './retention.mjs';
+import {moneyAudit} from './money-audit.mjs?v=9';
+import {agentState,defaultAgent,objections} from './agent.mjs?v=9';
+import {analyze,blockedResults,cleanImport,defaultRules,createImportIndex,importChanges,inWork,priorityFor,reasons,rulesFields,segmentKeys,terminalResults} from './retention.mjs?v=9';
 import {isOpen,parseMoney,releaseBooking,seedDeals,selectDeals,syncBooking,validDate,writeDeal} from './finance.mjs';
 
 const initialBranches = [
@@ -32,6 +32,7 @@ export const outcomes = {
   thinking:'Клиент думает',
   callback:'Перезвонить позже',
   declined:'Не заинтересован',
+  client_will_call:'Клиент свяжется сам',
   contacted:'Есть интерес',
   agreed:'Готов вернуться',
   invalid_number:'Неактуальный номер',
@@ -249,20 +250,26 @@ function outreachTask(clientId,assignee,due,day,{title='Предложить п�
 
 function planNextContact(state,client,values,day,task){
   const deal=state.opportunities.find(item=>item.clientId===client.id&&isOpen(item));
-  if(values.result==='booked'||values.result==='paid')return;
+  if(values.result==='booked'||values.result==='paid'){
+    delete client.waitingForClientSince;
+    return;
+  }
   const stop=blockedResults.has(values.result);
+  const waitsForClient=values.result==='client_will_call';
   const declined=values.result==='declined';
-  if(stop||declined){
+  if(waitsForClient)client.waitingForClientSince=day;
+  else if(['contacted','agreed','callback'].includes(values.result))delete client.waitingForClientSince;
+  if(stop||waitsForClient){
     if(values.result==='do_not_contact')client.callBlocked=true;
     if(values.result==='invalid_number')client.invalidPhone=true;
-    if(stop)for(const pending of state.tasks.filter(item=>item.clientId===client.id&&item.status!=='done')){
+    for(const pending of state.tasks.filter(item=>item.clientId===client.id&&item.status!=='done')){
       Object.assign(pending,{status:'done',closed:day,result:values.result,systemClosed:true,
         activity:[...(pending.activity??[]),{date:day,actor:values.assignee,title:'Закрыта: '+outcomes[values.result]}]});
     }
-    if(stop&&(!deal||deal.stage==='booked'))return;
+    if(!deal||deal.stage==='booked')return;
   }
-  if(deal?.stage!=='booked'||stop||declined){
-    const stage=stop||declined?'lost':['contacted','agreed'].includes(values.result)||deal?.stage==='interested'?'interested':'contact';
+  if(deal?.stage!=='booked'||declined){
+    const stage=stop||declined||waitsForClient?'lost':['contacted','agreed'].includes(values.result)||deal?.stage==='interested'?'interested':'contact';
     writeDeal(state,{
       id:deal?.id,clientId:client.id,assignee:values.assignee,stage,due:values.followUp,
       service:deal?.service||lastKnownVisit(state,client).service,plannedInput:deal?.planned==null?'':deal.planned/100,
@@ -360,7 +367,7 @@ export function applyCommand(state,command,fromContact=false){
     case 'agent-feedback': {
       const client=byClient(next,command.clientId);
       const {objection,option,helpful}=command;
-      if(!client||!Object.hasOwn(objections,objection)||!objections[objection].options.some(item=>item[0]===option)||
+      if(!client||!Object.hasOwn(objections,objection)||!objections[objection].options.some(item=>item.id===option)||
         typeof helpful!=='boolean')throw Error('Выберите подсказку агента.');
       const entry={clientId:client.id,branch:client.branch,objection,option,helpful,date:day,actor:command.actor||''};
       const existing=next.agent.feedback.findIndex(item=>item.clientId===client.id&&item.objection===objection&&item.option===option);
@@ -396,6 +403,7 @@ export function applyCommand(state,command,fromContact=false){
       const event={assignee:values.assignee,result:values.result,note:values.note??'',service:values.service??'',
         appointment:values.appointment,visitTime:values.visitTime,plannedInput:values.plannedInput,followUp:values.followUp,followUpTime:values.followUpTime};
       if(recovered){
+        delete client.waitingForClientSince;
         next.recoveries.push(recovered);
         for(const deal of next.opportunities.filter(item=>item.clientId===clientId&&isOpen(item))){
           Object.assign(deal,{stage:'recovered',closed:day,updated:day});
@@ -478,7 +486,7 @@ export function applyCommand(state,command,fromContact=false){
           (!validDate(followUp)||followUp<day||!validTime(followUpTime)||(result==='callback'&&!followUpTime))){
           throw Error('Укажите дату и время следующего контакта.');
         }
-        if(blockedResults.has(result)||result==='declined'||followUp){
+        if(blockedResults.has(result)||result==='declined'||result==='client_will_call'||followUp){
           planNextContact(next,client,{result,assignee,note:task.note,followUp,followUpTime},day,task);
         }
       }

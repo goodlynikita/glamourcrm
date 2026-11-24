@@ -1,12 +1,12 @@
-import {agentState,contactBrief,identifyObjection,recommend} from './agent.mjs?v=7';
+import {agentState,contactBrief,identifyObjection,objections,recommend} from './agent.mjs?v=9';
 import {contactGroups,contactTabs,nextContact} from './contact-desk.mjs';
-import {priorities,reasons,rulesFields,segmentKeys,terminalResults} from './retention.mjs';
+import {priorities,reasons,rulesFields,segmentKeys,terminalResults} from './retention.mjs?v=9';
 import {icon} from './icons.mjs';
-import * as m from './model.mjs';
+import * as m from './model.mjs?v=9';
 import {readFile,previewRows,demoCsv,detectColumns,fieldLabels} from './importer.mjs';
-import {repository,storageKey,serverMode,demoMode} from './repository.mjs';
+import {repository,storageKey,serverMode,demoMode} from './repository.mjs?v=9';
 import {money} from './finance.mjs';
-import {moneyAudit,priceLabels} from './money-audit.mjs';
+import {moneyAudit,priceLabels} from './money-audit.mjs?v=9';
 import {branchMoney,canStartReturn,paymentBuckets,paymentPeriods} from './work-analytics.mjs';
 
 const app=document.querySelector('#app');
@@ -47,7 +47,7 @@ const tag=(label,tone)=>'<span class="tag '+tone+'"><span></span>'+s(label)+'</s
 const badge=(key,list=m.statuses)=>tag(list[key].label,list[key].tone);
 const reasonTitle=key=>reasons[key||'manual']?.label||reasons.manual.label;
 const iconBox=(name,tone)=>'<span class="icon-box '+tone+'">'+icon(name,19)+'</span>';
-const logo='<img src="./assets/mark.svg" width="36" height="36" alt="">';
+const wordmark='<img class="studio-wordmark" src="./assets/glamour-wordmark.webp" width="740" height="298" alt="">';
 const tones=['berry','pink','stone','mint','peach'];
 const avatar=(name,index=0)=>'<span aria-hidden="true" class="avatar '+tones[index%tones.length]+'">'+s(m.initials(name))+'</span>';
 const clientAvatar=client=>avatar(client.name,Number(client.id.replace(/^c/,'').slice(0,2))||client.name.charCodeAt(0));
@@ -61,7 +61,7 @@ function savePrefs(){
 }
 function applyTheme(){
   document.documentElement.dataset.theme=ui.theme;
-  document.querySelector('meta[name="theme-color"]').content=ui.theme==='dark'?'#1a1719':'#f7f6f6';
+  document.querySelector('meta[name="theme-color"]').content=ui.theme==='dark'?'#1d171b':'#fdf7fa';
 }
 function notify(message,error=false){
   toastEl.innerHTML='<div class="toast '+(error?'toast-error':'')+'">'+icon(error?'info':'check',18)+'<span>'+s(message)+'</span></div>';
@@ -130,7 +130,7 @@ function shell(contents){
   const taskCount=m.queue(state,{branch:ui.branch,assignee:mine(),status:'open'}).length;
   const themeIcon=ui.theme==='light'?'moon':'sun';
   const themeLabel=ui.theme==='light'?'Включить тёмную тему':'Включить светлую тему';
-  return '<div class="layout"><aside class="sidebar'+(ui.mobileNav?' mobile-open':'')+'"><a href="#home" class="brand" data-action="navigate" data-id="home">'+logo+'<span><strong>GLAMOUR</strong><small>ВОЗВРАТ КЛИЕНТОВ</small></span></a>'+
+  return '<div class="layout"><aside class="sidebar'+(ui.mobileNav?' mobile-open':'')+'"><a href="#home" class="brand" data-action="navigate" data-id="home" aria-label="GLAMOUR, на главную">'+wordmark+'</a>'+
     '<div class="workspace"><span class="workspace-logo">'+icon('building',18)+'</span><span><strong>Сеть салонов</strong><small>GLAMOUR · Ижевск</small></span></div>'+
     '<nav aria-label="Разделы"><p class="nav-caption">РАБОЧЕЕ ПРОСТРАНСТВО</p>'+navEntry('home')+navEntry('contacts',taskCount)+navEntry('clients')+
     (manager()?'<p class="nav-caption tools-caption">УПРАВЛЕНИЕ</p>'+navEntry('agent')+navEntry('import')+navEntry('settings'):'')+'</nav>'+
@@ -175,7 +175,7 @@ function deskSelection(){
 function deskDraft(row){
   const key=[ui.profile,row.clientId,row.task?.id??''].join(':');
   if(!contactDrafts.has(key)){
-    contactDrafts.set(key,{objection:'',option:'',result:'',note:'',followUp:m.shiftDate(m.today(),1),followUpTime:'',
+    contactDrafts.set(key,{objection:'',topic:'',option:'',result:'',note:'',followUp:m.shiftDate(m.today(),1),followUpTime:'',
       paidAmount:'',paidDate:m.today(),requestId:m.newId()});
   }
   return {key,values:contactDrafts.get(key)};
@@ -201,20 +201,22 @@ function deskHistory(client){
     }).join('')+'</ol>':'<p class="desk-empty-history">Пока нет записей в истории.</p>')+'</section>';
 }
 function deskGuide(client,row,last,history){
-  const followUp=row.task?.reason==='followup';
+  const waiting=Boolean(client.waitingForClientSince&&(last.lastVisit||'')<=client.waitingForClientSince);
+  const followUp=!waiting&&row.task?.reason==='followup';
   const previous=followUp?history.find(event=>event.kind==='call'):null;
-  const reason=row.task?.originReason||m.retentionReason(state,client);
-  const guide=contactBrief({client,reason,service:last.service,previousResult:previous?.result,followUp});
+  const reason=waiting?'waiting':row.task?.originReason||m.retentionReason(state,client);
+  const guide=contactBrief({client,reason,service:last.service,staffName:m.byPerson(row.assignee)?.name,previousResult:previous?.result,followUp});
   const previousText=previous?.note?.trim();
   const preview=previousText&&identifyObjection(previousText)!=='other'
     ?{label:'Замечание из прошлого звонка',text:previousText.slice(0,900)}
     :demoMode&&client.source==='demo'?{label:'Пример ответа в демо',text:guide.example}:null;
-  return {...guide,preview};
+  return {...guide,preview,waiting};
 }
 const quickResults=[
   ['no_answer','Клиент не ответил','Укажите дату повторной попытки.'],
   ['contacted','Есть интерес','Зафиксируйте вопрос клиента и согласованную дату контакта.'],
   ['declined','Клиенту не актуально','Укажите причину, если она известна.'],
+  ['client_will_call','Клиент свяжется сам','Завершите разговор без повторной задачи.'],
   ['do_not_contact','Просит больше не звонить','Сохраните результат, чтобы исключить клиента из обзвона.']
 ];
 const callResults=[
@@ -231,41 +233,40 @@ const nextResultHelp={
   agreed:'Запишите договорённость и дату следующего контакта.',
   paid:'Укажите сумму и дату фактической оплаты.',
   declined:'Если известна причина отказа, добавьте её в комментарий.',
+  client_will_call:'Повторная задача не создаётся. Клиент свяжется по своей инициативе.',
   invalid_number:'Карточка будет исключена из обзвона из-за неверного номера.',
   do_not_contact:'Карточка будет исключена из обзвона по просьбе клиента.'
-};
-const outcomeChecks={
-  contacted:'Если клиент подтвердил интерес к варианту.',
-  callback:'Если клиент согласовал день и время звонка.',
-  thinking:'Если клиент хочет подумать и согласен на повторный контакт.',
-  declined:'Если клиент отказался от продолжения разговора.',
-  do_not_contact:'Если клиент попросил больше с ним не связываться.'
 };
 function deskAgentSuggestion(client,draft,guide){
   const actual=draft.objection.trim();
   const preview=actual?null:guide.preview;
   if(!actual&&!preview)return '';
   const feedback=agentState(state).feedback;
-  const suggestion=recommend(actual||preview.text,feedback,client.branch);
+  const suggestion=recommend(actual||preview.text,feedback,client.branch,draft.topic);
   const option=suggestion.options.find(item=>item.id===draft.option)||suggestion.options[0];
   const vote=feedback.find(item=>item.clientId===client.id&&item.objection===suggestion.key&&item.option===option.id);
   const extra='data-key="'+suggestion.key+'" data-option="'+option.id+'"';
+  const sensitive=['stop','wrong','urgent'].includes(suggestion.key);
   return '<div class="agent-suggestion">'+(preview?'<p class="agent-example"><strong>'+s(preview.label)+'</strong><span>«'+s(preview.text)+'»</span></p>':'')+
-    '<div class="agent-suggestion-head">'+tag(suggestion.label,suggestion.key==='stop'?'red':'berry')+
-    (suggestion.options.length>1?'<label class="sr-only" for="agent-option">Вариант ответа</label><select id="agent-option" data-agent-option>'+
-      opts(suggestion.options.map((item,index)=>[item.id,'Вариант '+(index+1)]),option.id)+'</select>':'')+'</div>'+
-    '<div class="agent-response"><h3>Что ответить</h3><blockquote>'+s(option.reply)+'</blockquote><h3>Что сделать</h3><p>'+s(option.step)+'</p></div>'+
+    '<div class="agent-suggestion-head">'+(preview||sensitive?tag(suggestion.label,sensitive?'red':'berry'):
+      '<label class="agent-select"><span>Ситуация</span><select id="agent-topic">'+
+      opts(Object.entries(objections).map(([key,item])=>[key,item.label]),suggestion.key)+'</select></label>')+
+    (suggestion.options.length>1?'<label class="agent-select"><span>Вариант ответа</span><select id="agent-option">'+
+      opts(suggestion.options.map(item=>[item.id,item.title]),option.id)+'</select></label>':'')+'</div>'+
+    '<div class="agent-response">'+(option.reply?'<h3>Что ответить</h3><blockquote>'+s(option.reply)+'</blockquote>':'')+
+    '<h3>Что сделать</h3><p>'+s(option.step)+'</p></div>'+
     (preview?button('Клиент так ответил',null,'secondary small','agent-use-example'):
-      '<p class="agent-condition">'+s(outcomeChecks[option.outcome])+'</p><div class="agent-tools">'+
-      button('Выбрать «'+m.outcomes[option.outcome]+'»',null,'secondary small','agent-step','data-id="'+option.outcome+'" data-copy-objection')+
+      (option.condition?'<p class="agent-condition">'+s(option.condition)+'</p>':'')+'<div class="agent-tools">'+
+      (option.outcome?button('Выбрать «'+m.outcomes[option.outcome]+'»',null,'secondary small','agent-step','data-id="'+option.outcome+'" data-copy-objection'):'')+
       button(vote?.helpful===true?'Помогло ✓':'Помогло',null,'secondary small','agent-rate',extra+' data-helpful="true" aria-pressed="'+(vote?.helpful===true)+'"')+
       button(vote?.helpful===false?'Не помогло ✓':'Не помогло',null,'secondary small','agent-rate',extra+' data-helpful="false" aria-pressed="'+(vote?.helpful===false)+'"')+'</div>')+'</div>';
 }
 function deskAgentPanel(client,draft,guide){
   return '<section class="panel desk-panel desk-agent"><div class="panel-head"><h2>Подсказка агента</h2>'+iconBox('sparkle','berry')+'</div>'+
-    '<div class="desk-agent-inner"><div class="agent-plan"><p><strong>Цель звонка</strong><span>'+s(guide.goal)+'</span></p>'+
-    '<p><strong>С чего начать</strong><span>'+s(guide.opening)+'</span></p></div>'+
-    field('Что сказал клиент','<textarea rows="2" maxlength="900" id="agent-objection" placeholder="Например, дорого или неудобно по времени">'+
+    '<div class="desk-agent-inner"><div class="agent-plan"><p><strong>С чего начать</strong><span>'+s(guide.opening)+'</span></p>'+
+    '<p><strong>'+s(guide.waiting?'Если клиент обратился':'После согласия говорить')+'</strong><span>'+s(guide.question)+'</span></p>'+
+    '<p><strong>Задача разговора</strong><span>'+s(guide.goal)+'</span></p></div>'+
+    field('Что сказал клиент','<textarea rows="2" maxlength="900" id="agent-objection" placeholder="Например, ушла в другой салон">'+
       s(draft.objection)+'</textarea>')+'<div id="agent-suggestion" aria-live="polite">'+deskAgentSuggestion(client,draft,guide)+'</div>'+
     '<details class="agent-next-actions"><summary>Что выбрать после звонка</summary><ul>'+quickResults.map(([result,label,detail])=>
       '<li>'+button(label,null,'secondary small','agent-step','data-id="'+result+'"')+'<span>'+s(detail)+'</span></li>').join('')+'</ul></details>'+
@@ -341,6 +342,7 @@ function contactDeskPage(){
 }
 function agentPage(){
   const config=agentState(state);
+  const feedback=config.feedback.filter(vote=>!ui.branch||vote.branch===ui.branch);
   return heading('Агент','',button('Подготовить очередь','checkList','primary','run-agent'))+
     '<div class="agent-management"><section class="panel"><div class="panel-head"><div><h2>Автоматическое назначение</h2><p>Сначала клиенты с наибольшим потенциалом</p></div>'+
     tag(config.auto?'Включено':'Выключено',config.auto?'green':'slate')+'</div><form id="agent-settings-form"><div class="modal-body form-grid">'+
@@ -350,7 +352,7 @@ function agentPage(){
     '<div class="form-error wide" role="alert" hidden></div><button class="button secondary" type="submit">Сохранить</button></div></form></section>'+
     '<section class="panel"><div class="panel-head"><div><h2>Результаты агента</h2></div>'+iconBox('chart','berry')+'</div><div class="modal-body agent-run">'+
     '<div><strong>'+m.number(config.lastRun?.assigned??0)+'</strong><span>Задач в последнем запуске с назначениями</span></div>'+
-    '<div><strong>'+m.number(config.feedback.length)+'</strong><span>Отметок по подсказкам</span></div>'+
+    '<div><strong>'+m.number(feedback.filter(vote=>vote.helpful).length)+' из '+m.number(feedback.length)+'</strong><span>Отметок «Помогло»</span></div>'+
     (config.lastRun?'<ul>'+config.lastRun.branches.map(item=>'<li>'+s(m.byBranch(item.id)?.name||'Филиал')+' · '+m.number(item.assigned)+'</li>').join('')+'</ul>':'')+
     '</div></section></div>';
 }
@@ -389,6 +391,7 @@ function rememberDeskField(field){
   if(field.id==='agent-objection'){
     const draft=deskDraft(row).values;
     draft.objection=field.value;
+    draft.topic='';
     draft.option='';
     refreshAgentSuggestion();
   }else if(field.form?.id==='desk-contact-form'&&contactDraftFields.includes(field.name)){
@@ -520,7 +523,8 @@ function recoveryHero(ready,readyAmount){
     '<p class="hero-scope">'+icon('pin',15)+s(ui.branch?m.byBranch(ui.branch)?.label:'Все филиалы')+'</p>'+
     '<h1 id="home-title">'+title+'</h1><p class="hero-detail">'+s(detail)+'</p>'+
     '<div class="hero-actions">'+queueAction+
-    (manager()?button('Импортировать базу','upload','hero-secondary','navigate','data-id="import"'):'')+'</div></div></section>';
+    (manager()?button('Импортировать базу','upload','hero-secondary','navigate','data-id="import"'):'')+'</div></div>'+
+    '<div class="hero-signature" aria-hidden="true">'+wordmark+'</div></section>';
 }
 const compactRubles=new Intl.NumberFormat('ru-RU',{notation:'compact',maximumFractionDigits:1});
 const intervalLabel=range=>range.from===range.through?m.formatDate(range.from):
@@ -600,10 +604,11 @@ function home(){
     '<div class="toolbar">'+tabs([['ready','Можно связаться · '+m.number(ready.length)],['working','В работе · '+m.number(inProgress.length)],
       ['all','Весь список · '+m.number(audit.rows.length)]],ui.homeFilter,'home-filter')+'</div>'+
     (list.length?'<div class="table-wrap"><table><thead><tr><th>Клиент</th><th>Причина</th><th>Потенциал</th><th aria-label="Действия"></th></tr></thead><tbody>'+
-    list.slice(0,ui.homeLimit).map(({client,reason,amount,basis,working,contactable,paused})=>
+    list.slice(0,ui.homeLimit).map(({client,reason,amount,basis,working,contactable,paused,waitingForClient})=>
       '<tr><td><button class="identity" type="button" data-action="desk-client" data-id="'+s(client.id)+'">'+clientAvatar(client)+'<span><strong>'+s(client.name)+'</strong><small>'+
       s(m.byBranch(client.branch)?.name||'')+'</small></span></button></td><td>'+badge(reason,reasons)+
-      (working?'<small class="cell-note">В работе</small>':!contactable?'<small class="cell-note">Нет телефона для контакта</small>':paused?'<small class="cell-note">Недавно связывались</small>':'')+'</td><td><strong class="nowrap">'+
+      (working?'<small class="cell-note">В работе</small>':!contactable?'<small class="cell-note">Нет телефона для контакта</small>':
+        waitingForClient?'<small class="cell-note">Клиент свяжется сам</small>':paused?'<small class="cell-note">Недавно связывались</small>':'')+'</td><td><strong class="nowrap">'+
       s(amount===null?'Нет оценки':money(amount))+'</strong>'+(basis?'<small class="cell-note">'+s(priceLabels[basis])+'</small>':'')+
       '</td><td class="row-end">'+button('Открыть','right','secondary small','desk-client','data-id="'+s(client.id)+'" aria-label="'+s('Открыть карточку клиента '+client.name)+'"')+'</td></tr>').join('')+
     '</tbody></table></div>':empty('Нет клиентов по этому фильтру','','users'))+
@@ -702,7 +707,7 @@ function settingsPage(){
 }
 function renderLogin(error=''){
   document.title='GLAMOUR CRM — Вход';
-  app.innerHTML='<main class="login-page"><form id="login-form" class="panel login-card"><div class="panel-head"><div>'+logo+
+  app.innerHTML='<main class="login-page"><form id="login-form" class="panel login-card"><div class="panel-head"><div>'+wordmark+
     '<h1>Вход в GLAMOUR CRM</h1></div></div><div class="modal-body form-grid">'+
     field('Логин',input('user','','text','required autocomplete="username" autofocus'),'wide')+
     field('Пароль',input('password','','password','required autocomplete="current-password"'),'wide')+
@@ -1094,8 +1099,15 @@ document.addEventListener('input',event=>{
 });
 document.addEventListener('change',event=>{
   const field=event.target;
-  if(field.id==='agent-option'){
-    const {row}=deskSelection();if(row){deskDraft(row).values.option=field.value;refreshAgentSuggestion();}
+  if(field.id==='agent-option'||field.id==='agent-topic'){
+    const {row}=deskSelection();
+    if(row){
+      const draft=deskDraft(row).values;
+      if(field.id==='agent-topic'){draft.topic=field.value;draft.option='';}
+      else draft.option=field.value;
+      refreshAgentSuggestion();
+      document.getElementById(field.id)?.focus();
+    }
     return;
   }
   if(field.form?.id==='desk-contact-form'){
