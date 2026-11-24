@@ -1,3 +1,4 @@
+import {agentState,defaultAgent,objections} from './agent.mjs';
 import {analyze,blockedResults,cleanImport,defaultRules,createImportIndex,importChanges,inWork,priorityFor,reasons,rulesFields,segmentKeys,terminalResults} from './retention.mjs';
 import {isOpen,parseMoney,releaseBooking,seedDeals,selectDeals,syncBooking,validDate,writeDeal} from './finance.mjs';
 
@@ -124,7 +125,8 @@ const taskSeed = [
 ];
 export function seed(day=today(),empty=false){
   return {
-    version:3,
+    version:4,
+    agent:defaultAgent(),
     settings:structuredClone(settingsFor({})),
     opportunities:empty?[]:seedDeals(day,shiftDate),
     clients:empty?[]:clientsSeed.map(([name,branch,age,service],index)=>({
@@ -271,9 +273,50 @@ function planNextContact(state,client,values,day,task){
       priority:task?.priority||'normal',dueTime:values.followUpTime||'',actor:values.assignee}));
   }
 }
+function agentCycle(state,day,onlyBranch=''){
+  const config=agentState(state);
+  const directory=settingsFor(state);
+  const branches=[];
+  let assigned=0;
+  for(const branch of directory.branches){
+    if(onlyBranch&&onlyBranch!==branch.id)continue;
+    const staff=directory.users.filter(person=>assignedBranches(person).includes(branch.id));
+    if(!staff.length)continue;
+    const clientIds=new Set(state.clients.filter(client=>client.branch===branch.id).map(client=>client.id));
+    const already=state.tasks.filter(task=>task.source==='agent'&&task.created===day&&clientIds.has(task.clientId)).length;
+    const remaining=Math.max(0,config.limit-already);
+    if(!remaining)continue;
+    const cooldown=shiftDate(day,-30);
+    const recent=new Set(state.tasks.filter(task=>task.status==='done'&&task.closed>cooldown).map(task=>task.clientId));
+    const candidates=availableForContact(state,branch.id).filter(client=>!recent.has(client.id)&&
+      !client.history.some(event=>event.kind==='call'&&event.date>cooldown));
+    const ranked=candidates.map((client,index)=>{
+      const reason=retentionReason(state,client,day);
+      return {id:client.id,index,reason,priority:priorityFor(reason,dateDiff(day,lastKnownVisit(state,client).lastVisit),directory.rules)};
+    }).sort((a,b)=>Number(b.priority==='high')-Number(a.priority==='high')||a.index-b.index).slice(0,remaining);
+    if(!ranked.length)continue;
+    const load=new Map(staff.map(person=>[person.id,state.tasks.filter(task=>task.assignee===person.id&&task.status!=='done').length]));
+    for(const candidate of ranked){
+      const person=staff.reduce((least,next)=>load.get(next.id)<load.get(least.id)?next:least);
+      const task=outreachTask(candidate.id,person.id,shiftDate(day,directory.rules.taskDays),day,
+        {reason:candidate.reason,priority:candidate.priority});
+      task.source='agent';
+      task.activity[0].title='Задача создана агентом';
+      state.tasks.push(task);
+      load.set(person.id,load.get(person.id)+1);
+    }
+    assigned+=ranked.length;
+    branches.push({id:branch.id,assigned:ranked.length});
+  }
+  if(assigned)state.agent.lastRun={date:day,assigned,branches};
+  return assigned;
+}
+
 export function upgradeState(state){
-  if(Array.isArray(state.opportunities))return state.settings?state:{...state,version:3,settings:structuredClone(settingsFor(state))};
-  const next={...state,version:3,settings:structuredClone(settingsFor(state)),opportunities:[]};
+  if(Array.isArray(state.opportunities)){
+    return state.settings&&state.agent?state:{...state,version:4,settings:structuredClone(settingsFor(state)),agent:state.agent??defaultAgent()};
+  }
+  const next={...state,version:4,settings:structuredClone(settingsFor(state)),agent:defaultAgent(),opportunities:[]};
   const bookings=[];
   for(const task of state.tasks){
     if(task.result==='booked'&&task.appointment)bookings.push({event:task,clientId:task.clientId,reference:'task:'+task.id,date:task.closed});
@@ -294,6 +337,25 @@ export function applyCommand(state,command,fromContact=false){
   let next=structuredClone(upgradeState(state));
   const day=today();
   switch(command.type){
+    case 'agent-cycle':
+      return {next,value:{assigned:agentCycle(next,day,command.branch)}};
+    case 'agent-settings': {
+      const limit=Number(command.limit);
+      if(typeof command.auto!=='boolean'||!Number.isInteger(limit)||limit<1||limit>50)throw Error('Укажите от 1 до 50 задач на филиал.');
+      Object.assign(next.agent,{auto:command.auto,limit});
+      return {next,value:{assigned:command.auto?agentCycle(next,day):0}};
+    }
+    case 'agent-feedback': {
+      const client=byClient(next,command.clientId);
+      const {objection,option,helpful}=command;
+      if(!client||!Object.hasOwn(objections,objection)||!objections[objection].options.some(item=>item[0]===option)||
+        typeof helpful!=='boolean')throw Error('Выберите подсказку агента.');
+      const entry={clientId:client.id,branch:client.branch,objection,option,helpful,date:day,actor:command.actor||''};
+      const existing=next.agent.feedback.findIndex(item=>item.clientId===client.id&&item.objection===objection&&item.option===option);
+      if(existing<0)next.agent.feedback.push(entry);
+      else next.agent.feedback[existing]=entry;
+      return {next,value:{recorded:true}};
+    }
     case 'record-contact': {
       const {clientId,taskId,values}=command;
       const client=byClient(next,clientId);
@@ -424,7 +486,8 @@ export function applyCommand(state,command,fromContact=false){
         }
       }
       next.imports.unshift({id:newId(),name:String(command.filename||'Импорт').slice(0,240),date:day,added,updated,duplicates,conflicts});
-      return {next,value:{added,updated,duplicates,conflicts}};
+      const assigned=next.agent.auto&&(added||updated)?agentCycle(next,day):0;
+      return {next,value:{added,updated,duplicates,conflicts,assigned}};
     }
     case 'save-settings': {
       const {rules,branches:directory,users}=command.values;

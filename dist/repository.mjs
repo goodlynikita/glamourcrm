@@ -8,12 +8,16 @@ export class BrowserRepository {
   }
   async read(){
     const saved=this.storage.getItem(storageKey);
-    return saved ? upgradeState(JSON.parse(saved)) : seed();
+    const previous=saved?JSON.parse(saved):null;
+    const snapshot=previous?upgradeState(previous):seed();
+    if(!previous?.agent)snapshot.agent.auto=true;
+    return snapshot;
   }
   async dispatch(command){
     const update=async()=>{
       const state=await this.read();
       const {next,value}=applyCommand(state,{...command,demoOnly:true});
+      if(command.type==='reset-demo')next.agent.auto=true;
       this.storage.setItem(storageKey,JSON.stringify(next));
       return {state:next,value};
     };

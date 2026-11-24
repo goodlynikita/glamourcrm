@@ -180,4 +180,22 @@ const server=createServer(async(req,res)=>{
     json(res,status,{error:status===500?'Непредвиденная ошибка сервера.':error.message});
   }
 });
+function scheduleAgent(){
+  let started=false;
+  try{
+    db.exec('BEGIN IMMEDIATE');
+    started=true;
+    const snapshot=state();
+    if(snapshot.agent.auto){
+      const {next,value}=applyCommand(snapshot,{type:'agent-cycle'});
+      if(value.assigned)putState.run(JSON.stringify(next));
+    }
+    db.exec('COMMIT');
+  }catch(error){
+    if(started)db.exec('ROLLBACK');
+    console.error('Агент: '+error.name);
+  }
+}
+scheduleAgent();
+setInterval(scheduleAgent,15*60*1000).unref();
 server.listen(port,host,()=>console.log('GLAMOUR CRM · http://'+host+':'+server.address().port+(demo?' · демо':'')));

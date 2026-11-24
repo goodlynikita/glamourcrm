@@ -1,3 +1,5 @@
+import {agentState,identifyObjection,recommend} from './agent.mjs';
+import {contactGroups,contactTabs,nextContact} from './contact-desk.mjs';
 import {priorities,reasons,rulesFields,segmentKeys,terminalResults} from './retention.mjs';
 import {icon} from './icons.mjs';
 import * as m from './model.mjs';
@@ -12,24 +14,25 @@ const preferencesKey='glamour-crm-preferences';
 let savedPrefs={};
 try {savedPrefs=JSON.parse(localStorage.getItem(preferencesKey)||'{}');} catch {}
 const routes={
-  home:['Рабочий стол','grid'],clients:['Клиенты','users'],tasks:['Задачи','checkList'],
-  pipeline:['Воронка','funnel'],visits:['Записи','calendar'],branches:['Филиалы','building'],analytics:['Панель руководителя','chart'],import:['Импорт данных','upload'],settings:['Настройки','checkList']
+  home:['Рабочий стол','grid'],contacts:['Работа с клиентами','phone'],clients:['Клиенты','users'],tasks:['Задачи','checkList'],
+  pipeline:['Воронка','funnel'],visits:['Записи','calendar'],branches:['Филиалы','building'],analytics:['Панель руководителя','chart'],import:['Импорт данных','upload'],settings:['Настройки','checkList'],agent:['Агент','sparkle']
 };
 const pageFromHash=()=>Object.hasOwn(routes,location.hash.slice(1))?location.hash.slice(1):'home';
 const ui={
   page:pageFromHash(),theme:savedPrefs.theme==='dark'?'dark':'light',profile:m.byPerson(savedPrefs.profile)?.id||'manager',
   branch:m.byBranch(savedPrefs.branch)?.id||'',query:'',segment:'',taskStatus:'open',taskWhen:'',taskPriority:'',owner:'mine',
-  homeFilter:'ready',homeReason:'',homeLimit:8,visitWeek:0,visitDay:'',pipelineView:savedPrefs.pipelineView==='list'?'list':'board',
+  homeFilter:'ready',homeReason:'',homeLimit:8,contactTab:'ready',contactClient:'',contactPinned:false,visitWeek:0,visitDay:'',pipelineView:savedPrefs.pipelineView==='list'?'list':'board',
   clientSort:'attention',period:30,reportReason:'',stage:'open',dealWindow:'',dealLimit:12,mobileNav:false,importFile:null,importLayout:null,importMapping:null,importPreview:null,importError:'',
   importBusy:false,fallback:m.byBranch(savedPrefs.branch)?.id||'center',clientLimit:12,taskLimit:15
 };
-let state, rawState, account, modal, toastTimer;
+let state, rawState, account, modal, toastTimer,contactSaving=false;
+const contactDrafts=new Map();
 const s=value=>String(value??'').replace(/[&<>"']/g,ch=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'})[ch]);
 const attr=(name,value)=>' '+name+'="'+s(value)+'"';
 const cap=text=>text.charAt(0).toUpperCase()+text.slice(1);
 const person=()=>serverMode?account:m.byPerson(ui.profile,rawState);
 const manager=()=>!person()?.branch;
-const managerPages=new Set(['analytics','import','settings']);
+const managerPages=new Set(['analytics','import','settings','agent']);
 const assignees=()=>m.people.filter(p=>p.branch&&(manager()||p.id===ui.profile));
 const defaultAssignee=branch=>assignees().find(p=>m.assignedBranches(p).includes(branch))?.id;
 const mine=()=>manager()?'':ui.profile;
@@ -70,6 +73,7 @@ function useSnapshot(snapshot){
     const settings=m.settingsFor(rawState);
     state={...rawState,clients,tasks:rawState.tasks.filter(task=>ids.has(task.clientId)),
       opportunities:rawState.opportunities.filter(deal=>ids.has(deal.clientId)),imports:[],
+      agent:{...rawState.agent,lastRun:null,feedback:rawState.agent.feedback.filter(item=>owned.includes(item.branch))},
       settings:{...settings,branches:settings.branches.filter(branch=>owned.includes(branch.id)),
         users:settings.users.filter(user=>m.assignedBranches(user).some(branch=>owned.includes(branch)))}};
   }else state=rawState;
@@ -77,11 +81,11 @@ function useSnapshot(snapshot){
   if(ui.branch&&!m.byBranch(ui.branch))ui.branch='';
   if(!m.byBranch(ui.fallback))ui.fallback=m.branches[0]?.id||'';
 }
-async function run(command){
+async function run(command,{refresh=true}={}){
   try{
     const response=await repository.dispatch({...command,actor:ui.profile});
     useSnapshot(response.state);
-    render();
+    if(refresh)render();
     return response.value;
   }catch(error){
     if(serverMode&&error.status===401){account=null;closeModal();renderLogin('Сессия завершилась. Войдите снова.');}
@@ -90,7 +94,7 @@ async function run(command){
 }
 function resetNav(){
   ui.query='';ui.segment='';ui.taskStatus='open';ui.taskWhen='';ui.taskPriority='';ui.owner='mine';ui.clientSort='attention';
-  ui.clientLimit=12;ui.taskLimit=15;ui.dealLimit=12;ui.stage='open';ui.dealWindow='';ui.homeFilter='ready';ui.homeReason='';ui.homeLimit=8;ui.visitWeek=0;ui.visitDay='';ui.mobileNav=false;
+  ui.clientLimit=12;ui.taskLimit=15;ui.dealLimit=12;ui.stage='open';ui.dealWindow='';ui.homeFilter='ready';ui.homeReason='';ui.homeLimit=8;ui.contactTab='ready';ui.contactClient='';ui.contactPinned=false;ui.visitWeek=0;ui.visitDay='';ui.mobileNav=false;
 }
 function go(page,filters={}){
   if(managerPages.has(page)&&!manager())page='home';
@@ -121,8 +125,8 @@ function shell(contents){
   const themeLabel=ui.theme==='light'?'Включить тёмную тему':'Включить светлую тему';
   return '<div class="layout"><aside class="sidebar'+(ui.mobileNav?' mobile-open':'')+'"><a href="#home" class="brand" data-action="navigate" data-id="home">'+logo+'<span><strong>GLAMOUR</strong><small>САЛОННАЯ CRM</small></span></a>'+
     '<div class="workspace"><span class="workspace-logo">'+icon('building',18)+'</span><span><strong>Сеть салонов</strong><small>GLAMOUR · Ижевск</small></span></div>'+
-    '<nav aria-label="Разделы"><p class="nav-caption">РАБОЧЕЕ ПРОСТРАНСТВО</p>'+navEntry('home')+navEntry('clients')+navEntry('tasks',taskCount)+navEntry('pipeline')+navEntry('visits')+navEntry('branches')+
-    (manager()?'<p class="nav-caption tools-caption">УПРАВЛЕНИЕ</p>'+navEntry('analytics')+navEntry('import')+navEntry('settings'):'')+'</nav>'+
+    '<nav aria-label="Разделы"><p class="nav-caption">РАБОЧЕЕ ПРОСТРАНСТВО</p>'+navEntry('home')+navEntry('contacts')+navEntry('clients')+navEntry('tasks',taskCount)+navEntry('pipeline')+navEntry('visits')+navEntry('branches')+
+    (manager()?'<p class="nav-caption tools-caption">УПРАВЛЕНИЕ</p>'+navEntry('analytics')+navEntry('agent')+navEntry('import')+navEntry('settings'):'')+'</nav>'+
     '<div class="sidebar-foot">'+(demoMode?'<div class="demo"><span></span> Деморежим</div>':'')+
     '<button class="profile" type="button" data-action="profile" aria-label="'+(serverMode?'Мой аккаунт':'Сменить демопрофиль')+'">'+avatar(p.name,manager()?1:0)+
     '<span class="profile-text"><strong>'+s(p.name)+'</strong><small>'+s(p.role)+'</small></span>'+icon('chevron',16)+'</button></div></aside>'+
@@ -161,6 +165,279 @@ function taskTable(tasks){
 const categoryOptions=keys=>keys.map(key=>[key,reasonTitle(key)]);
 const clientCategories=[...segmentKeys,'future','working','excluded','unknown','clear'];
 const displayDueTime=task=>task.dueTime?'<small class="cell-note">'+s(task.dueTime)+'</small>':'';
+const contactDraftFields=['result','followUp','followUpTime','appointment','visitTime','service','plannedInput','note'];
+function scopedContactGroups(){
+  return contactGroups(state,{branch:ui.branch,assignee:mine()});
+}
+function deskSelection(){
+  const groups=scopedContactGroups();
+  const rows=groups[ui.contactTab];
+  const selected=rows.find(row=>row.clientId===ui.contactClient);
+  if(selected)return {groups,rows,row:selected,index:rows.indexOf(selected)};
+  const client=ui.contactPinned&&m.byClient(state,ui.contactClient);
+  if(client&&(!ui.branch||ui.branch===client.branch)){
+    const contact=groups.all.find(row=>row.clientId===client.id);
+    return {groups,rows,row:contact??{clientId:client.id,assignee:mine()||defaultAssignee(client.branch)},index:-1};
+  }
+  return {groups,rows,row:rows[0],index:rows.length?0:-1};
+}
+function deskDraft(row){
+  const key=[ui.profile,row.clientId,row.task?.id??''].join(':');
+  if(!contactDrafts.has(key)){
+    const client=m.byClient(state,row.clientId);
+    const deal=row.deal??state.opportunities.find(item=>item.clientId===client.id&&isOpen(item));
+    const lastNote=m.clientHistory(state,client).find(event=>event.kind==='call'&&event.note)?.note;
+    const fromHistory=Boolean(lastNote&&identifyObjection(lastNote)!=='other');
+    contactDrafts.set(key,{objection:fromHistory?lastNote.slice(0,900):'',fromHistory,option:'',result:'',note:'',followUp:m.shiftDate(m.today(),1),followUpTime:'',
+      service:deal?.service||m.lastKnownVisit(state,client).service,plannedInput:moneyInput(deal?.planned),visitTime:'',appointment:''});
+  }
+  return {key,values:contactDrafts.get(key)};
+}
+function openContactDesk(id){
+  if(!m.byClient(state,id)||contactSaving)return;
+  const groups=scopedContactGroups();
+  const tab=groups.ready.some(row=>row.clientId===id)?'ready':
+    groups.followup.some(row=>row.clientId===id)?'followup':'all';
+  go('contacts',{contactTab:tab,contactClient:id,contactPinned:!groups.all.some(row=>row.clientId===id)});
+}
+function deskFact(label,value){
+  return '<div><dt>'+s(label)+'</dt><dd>'+s(value??'—')+'</dd></div>';
+}
+function deskHistory(client){
+  const events=m.clientHistory(state,client).slice(0,6);
+  return '<section class="panel desk-panel"><div class="panel-head"><h2>История клиента</h2>'+iconBox('clock','stone')+'</div>'+
+    (events.length?'<ol class="desk-history">'+events.map(event=>{
+      const label=event.kind==='call'?m.outcomes[event.result]:event.kind==='payment'?'Оплата · '+money(event.amount):event.title;
+      const details=[event.assignee?m.byPerson(event.assignee)?.name:'',event.appointment?'Запись '+m.longDate(event.appointment):''].filter(Boolean);
+      return '<li><span class="history-point"></span><div><div class="history-meta"><strong>'+s(label)+'</strong><time datetime="'+s(event.date)+'">'+s(m.formatDate(event.date))+'</time></div>'+
+        (details.length?'<small>'+s(details.join(' · '))+'</small>':'')+(event.note?'<p>'+s(event.note)+'</p>':'')+'</div></li>';
+    }).join('')+'</ol>':'<p class="desk-empty-history">Пока нет записей в истории.</p>')+'</section>';
+}
+function deskAgentSuggestion(client,draft){
+  if(!draft.objection.trim()){
+    const preparation={cancellation:'Спросите, что помешало прийти, и проверьте возможные даты для новой записи.',
+      regular:'Уточните, изменились ли пожелания по последней услуге, и предложите удобный следующий шаг.',
+      single:'Спросите, как прошёл первый визит и что можно сделать удобнее при повторной записи.',
+      inactive:'Уточните, актуальна ли сейчас услуга, и проверьте ближайшие варианты записи.'}[m.retentionReason(state,client)];
+    return preparation?'<p class="desk-empty-agent"><strong>Перед звонком</strong> · '+s(preparation)+'</p>':
+      '<p class="desk-empty-agent">Введите возражение, чтобы агент предложил ответ.</p>';
+  }
+  const suggestion=recommend(draft.objection,agentState(state).feedback,client.branch);
+  const option=suggestion.options.find(item=>item.id===draft.option)||suggestion.options[0];
+  const vote=agentState(state).feedback.find(item=>item.clientId===client.id&&item.objection===suggestion.key&&item.option===option.id);
+  const extra='data-key="'+suggestion.key+'" data-option="'+option.id+'"';
+  return '<div class="agent-suggestion"><div class="agent-suggestion-head"><div>'+tag(suggestion.label,suggestion.key==='stop'?'red':'berry')+'</div>'+
+    (suggestion.options.length>1?'<label class="sr-only" for="agent-option">Вариант ответа</label><select id="agent-option" aria-label="Вариант ответа" data-agent-option>'+
+      opts(suggestion.options.map((item,index)=>[item.id,'Вариант '+(index+1)]),option.id)+'</select>':'')+'</div>'+
+    '<div class="agent-response"><h3>Что ответить</h3><blockquote>'+s(option.reply)+'</blockquote><h3>Следующий шаг</h3><p>'+s(option.step)+'</p></div>'+
+    '<div class="agent-tools">'+button('Применить шаг',null,'secondary small','agent-step','data-id="'+option.outcome+'"')+
+    button(vote?.helpful===true?'Помогло ✓':'Помогло',null,'secondary small','agent-rate',extra+' data-helpful="true" aria-pressed="'+(vote?.helpful===true)+'"')+
+    button(vote?.helpful===false?'Не помогло ✓':'Не помогло',null,'secondary small','agent-rate',extra+' data-helpful="false" aria-pressed="'+(vote?.helpful===false)+'"')+'</div>'+
+    '<p class="agent-basis">'+(suggestion.votes?'Учтено отметок по этому возражению в филиале: '+m.number(suggestion.votes):'Отметьте результат, чтобы улучшить следующую подсказку.')+'</p></div>';
+}
+function deskAgentPanel(client,draft){
+  return '<section class="panel desk-panel desk-agent"><div class="panel-head"><div><h2>Помощник по возражениям</h2></div>'+iconBox('sparkle','berry')+'</div>'+
+    '<div class="desk-agent-inner">'+field(draft.fromHistory?'Из предыдущего контакта':'Что сказал клиент','<textarea rows="2" maxlength="900" id="agent-objection" placeholder="Например, мне дорого или неудобно по времени">'+
+      s(draft.objection)+'</textarea>')+'<div id="agent-suggestion" aria-live="polite">'+deskAgentSuggestion(client,draft)+'</div></div></section>';
+}
+function deskClientCard(row,index,rows){
+  const client=m.byClient(state,row.clientId);
+  const record=deskDraft(row);
+  const {values:draft}=record;
+  const last=m.lastKnownVisit(state,client);
+  const future=m.retentionReason(state,client)==='future';
+  const excluded=client.callBlocked||client.invalidPhone;
+  const callable=!excluded&&!(!row.task&&future)&&Boolean(row.assignee&&client.phone);
+  const reason=row.task?.originReason||row.task?.reason||m.retentionReason(state,client);
+  const title=row.task?.title||(row.deal?nextStep(row.deal,m.today()):'Связаться с клиентом');
+  const owner=m.byPerson(row.assignee)?.name;
+  const deal=row.deal??state.opportunities.find(item=>item.clientId===client.id&&isOpen(item));
+  const status=row.task?.status||'';
+  const latest=state.opportunities.filter(item=>item.clientId===client.id&&item.stage==='paid'&&item.actual!=null)
+    .sort((a,b)=>b.paymentDate.localeCompare(a.paymentDate))[0];
+  const when=row.due?[m.longDate(row.due),row.task?.dueTime].filter(Boolean).join(' · '):'Без срока';
+  const canAdvance=index>=0&&rows.length>1;
+  const fill=draft;
+  const form='<form id="desk-contact-form" data-key="'+s(record.key)+'" data-client="'+s(client.id)+'" data-task="'+s(row.task?.id||'')+'">'+
+    '<div class="desk-form form-grid">'+outcomeFields(fill)+followUpFields(draft)+
+    '<input type="hidden" name="assignee" value="'+s(row.assignee)+'">'+
+    field('Комментарий','<textarea name="note" maxlength="1200" rows="3" placeholder="Что обсудили и о чём договорились">'+s(draft.note)+'</textarea>','wide')+
+    '<div class="form-error wide" role="alert" hidden></div></div>'+
+    '<div class="desk-save"><button class="button primary" type="submit" name="advance" value="yes"'+(contactSaving?' disabled':'')+'>'+icon('check',17)+
+    (canAdvance?'Сохранить и дальше':'Сохранить результат')+'</button>'+
+    (canAdvance?'<button class="button secondary" type="submit" name="advance" value="no"'+(contactSaving?' disabled':'')+'>Сохранить без перехода</button>':'')+'</div></form>';
+  return '<div class="desk-grid"><div class="desk-column"><section class="panel desk-panel desk-client"><div class="desk-client-head">'+clientAvatar(client)+
+    '<div><h2 tabindex="-1" id="contact-desk-client">'+s(client.name)+'</h2><p>'+s(m.byBranch(client.branch)?.label)+'</p></div>'+
+    (row.task?.priority==='high'?badge('high',priorities):'')+'</div>'+
+    '<div class="desk-phone">'+icon('phone',19)+'<div><small>Телефон клиента</small><strong>'+s(m.formatPhone(client.phone))+'</strong></div>'+
+    (client.phone?button('Копировать',null,'secondary small','copy-desk-phone','data-id="'+s(client.id)+'"'):'')+'</div>'+
+    '<div class="desk-reason"><div class="desk-kicker">Причина контакта</div><strong>'+s(reasonTitle(reason))+'</strong><p>'+s(title)+'</p>'+
+    '<div class="desk-task-meta">'+icon('calendar',16)+s(when)+(owner?'<span>'+s(owner)+'</span>':'')+(status?badge(status):'')+'</div></div>'+
+    (row.task?.note?'<p class="desk-task-note">'+s(row.task.note)+'</p>':'')+'</section>'+
+    '<section class="panel desk-panel desk-result"><div class="panel-head"><h2>Результат контакта</h2>'+iconBox('checkList','pink')+'</div>'+
+    (callable?form:'<p class="desk-empty-agent">'+s(excluded?'Клиент исключён из контактов.':future?'У клиента есть будущая запись.':'Нет номера телефона или ответственного.')+'</p>')+'</section></div>'+
+    '<aside class="desk-column">'+(callable?deskAgentPanel(client,draft):'')+'<section class="panel desk-panel"><div class="panel-head"><h2>О клиенте</h2>'+
+    button('Полная карточка',null,'secondary small','client','data-id="'+s(client.id)+'"')+'</div>'+
+    '<dl class="desk-facts">'+deskFact('Последний визит',last.lastVisit?m.longDate(last.lastVisit):'Нет данных')+
+    deskFact('Визитов по выгрузке',client.visitCount)+deskFact('Последняя услуга',last.service||'—')+
+    deskFact('Запись',m.longDate(deal?.visitDate||client.nextBooking))+deskFact('Последняя отмена',m.longDate(client.lastCancellation))+
+    deskFact('Сегмент',reasonTitle(m.retentionReason(state,client)))+'</dl>'+
+    (deal?.planned!=null||latest?'<dl class="desk-money">'+(deal?.planned!=null?deskFact('Сумма в работе',money(deal.planned)):'')+
+      (latest?deskFact('Последняя оплата',money(latest.actual)):'')+'</dl>':'')+'</section>'+deskHistory(client)+'</aside></div>';
+}
+function contactDeskPage(){
+  const {groups,rows,row,index}=deskSelection();
+  const controlButton=(label,direction,disabled)=>button(label,null,'secondary small','desk-move',
+    'data-id="'+direction+'"'+(disabled||contactSaving?' disabled':''));
+  return heading('Работа с клиентами','',manager()?button('Назначить обзвон','plus','secondary','batch'):'')+
+    '<section class="panel desk-toolbar"><div class="desk-toolbar-tabs">'+tabs(Object.entries(contactTabs).map(([key,label])=>
+      [key,label+' · '+m.number(groups[key].length)]),ui.contactTab,'desk-tab')+'</div><div class="desk-nav">'+
+    controlButton('Предыдущий','prev',index<=0)+'<div class="desk-position" aria-live="polite">'+
+    (index>=0?'<span><strong>'+m.number(index+1)+'</strong> из '+m.number(rows.length)+'</span><progress aria-label="Позиция в очереди" value="'+(index+1)+'" max="'+rows.length+'"></progress>':
+      '<span>'+(row?'Отдельная карточка':'Очередь пуста')+'</span>')+'</div>'+
+    controlButton('Следующий','next',index<0||index>=rows.length-1)+'</div></section>'+
+    (row?deskClientCard(row,index,rows):'<section class="panel">'+empty('В этой очереди пока нет клиентов','Выберите другой фильтр или проверьте назначение задач.','phone')+'</section>');
+}
+function agentPage(){
+  const config=agentState(state);
+  return heading('Агент','',button('Подготовить очередь','checkList','primary','run-agent'))+
+    '<div class="agent-management"><section class="panel"><div class="panel-head"><div><h2>Автоматическое назначение</h2><p>По настроенным сегментам</p></div>'+
+    tag(config.auto?'Включено':'Выключено',config.auto?'green':'slate')+'</div><form id="agent-settings-form"><div class="modal-body form-grid">'+
+    '<label class="agent-check wide"><input type="checkbox" name="auto"'+(config.auto?' checked':'')+'>Автоматически назначать задачи после импорта</label>'+
+    field('До задач на филиал в день',input('limit',config.limit,'number','required min="1" max="50"'))+
+    '<p class="secondary-text wide">'+(serverMode?'Сервер также проверяет очередь каждые 15 минут.':'В демо агент запускается после импорта или кнопкой выше.')+'</p>'+
+    '<div class="form-error wide" role="alert" hidden></div><button class="button secondary" type="submit">Сохранить</button></div></form></section>'+
+    '<section class="panel"><div class="panel-head"><div><h2>Результаты агента</h2></div>'+iconBox('chart','berry')+'</div><div class="modal-body agent-run">'+
+    '<div><strong>'+m.number(config.lastRun?.assigned??0)+'</strong><span>Задач в последнем запуске с назначениями</span></div>'+
+    '<div><strong>'+m.number(config.feedback.length)+'</strong><span>Отметок по подсказкам</span></div>'+
+    (config.lastRun?'<ul>'+config.lastRun.branches.map(item=>'<li>'+s(m.byBranch(item.id)?.name||'Филиал')+' · '+m.number(item.assigned)+'</li>').join('')+'</ul>':'')+
+    '</div></section></div>';
+}
+
+function selectDeskTab(id){
+  if(contactSaving||!Object.hasOwn(contactTabs,id))return;
+  ui.contactTab=id;
+  ui.contactPinned=false;
+  ui.contactClient='';
+  render();
+  document.querySelector('[data-action="desk-tab"][aria-pressed="true"]')?.focus();
+}
+function moveDesk(direction){
+  if(contactSaving)return;
+  const {rows,index}=deskSelection();
+  const next=rows[index+(direction==='prev'?-1:1)];
+  if(index<0||!next)return;
+  ui.contactClient=next.clientId;
+  ui.contactPinned=false;
+  render();
+  document.querySelector('#contact-desk-client')?.focus();
+}
+async function copyDeskPhone(id){
+  const client=m.byClient(state,id);
+  if(!client?.phone)return;
+  try{
+    await navigator.clipboard.writeText('+'.concat(client.phone));
+    notify('Телефон скопирован');
+  }catch{notify('Выделите номер в карточке и скопируйте вручную.',true);}
+}
+function rememberDeskField(field){
+  if(ui.page!=='contacts')return;
+  const {row}=deskSelection();
+  if(!row)return;
+  if(field.id==='agent-objection'){
+    const draft=deskDraft(row).values;
+    draft.objection=field.value;
+    draft.option='';
+    refreshAgentSuggestion();
+  }else if(field.form?.id==='desk-contact-form'&&contactDraftFields.includes(field.name)){
+    const draft=contactDrafts.get(field.form.dataset.key);
+    if(draft)draft[field.name]=field.value;
+  }
+}
+function refreshAgentSuggestion(){
+  const panel=document.querySelector('#agent-suggestion');
+  const {row}=deskSelection();
+  if(panel&&row)panel.innerHTML=deskAgentSuggestion(m.byClient(state,row.clientId),deskDraft(row).values);
+}
+function applyAgentStep(result){
+  const form=document.querySelector('#desk-contact-form');
+  if(!form||!Object.hasOwn(m.outcomes,result)||contactSaving)return;
+  form.elements.result.value=result;
+  rememberDeskField(form.elements.result);
+  toggleOutcome(form);
+  form.elements.result.focus();
+  form.elements.result.scrollIntoView?.({block:'nearest'});
+  notify('Результат выбран. Проверьте его перед сохранением.');
+}
+async function rateAgent(button){
+  const {row}=deskSelection();
+  if(!row||button.disabled)return;
+  button.disabled=true;
+  const {key,option,helpful}=button.dataset;
+  try{
+    await run({type:'agent-feedback',clientId:row.clientId,objection:key,option,helpful:helpful==='true'},{refresh:false});
+    const current=ui.page==='contacts'&&deskSelection().row;
+    if(current?.clientId===row.clientId){
+      const draft=deskDraft(current).values;
+      draft.option=helpful==='true'?option:'';
+      refreshAgentSuggestion();
+    }
+    notify('Оценка сохранена');
+  }catch(error){button.disabled=false;notify(error.message,true);}
+}
+async function saveDeskResult(event){
+  if(contactSaving)return;
+  const form=event.target;
+  const {client,task,key}=form.dataset;
+  const before=deskSelection();
+  const {contactTab:tab,contactClient:selection,branch,profile}=ui;
+  const data=Object.fromEntries(new FormData(form));
+  const advance=event.submitter?.value!=='no'&&before.index>=0;
+  contactSaving=true;
+  for(const button of form.querySelectorAll('[type="submit"]'))button.disabled=true;
+  try{
+    await run({type:'record-contact',clientId:client,taskId:task,values:data},{refresh:false});
+    contactDrafts.delete(key);
+    contactSaving=false;
+    if(ui.page==='contacts'&&ui.contactTab===tab&&ui.contactClient===selection&&ui.branch===branch&&ui.profile===profile){
+      ui.contactClient=advance?nextContact(before.rows,client,scopedContactGroups()[tab]):client;
+      ui.contactPinned=!advance;
+    }
+    render();
+    if(ui.page==='contacts')document.querySelector('#contact-desk-client')?.focus();
+    notify(data.result==='booked'?'Клиент записан':terminalResults.has(data.result)?'Результат сохранён':
+      'Повторный контакт: '+m.formatDate(data.followUp)+(data.followUpTime?' · '+data.followUpTime:''));
+  }catch(error){
+    contactSaving=false;
+    const message=form.querySelector('.form-error');
+    message.textContent=error.message;
+    message.hidden=false;
+    for(const button of form.querySelectorAll('[type="submit"]'))button.disabled=false;
+  }
+}
+async function saveAgentSettings(form){
+  const data=new FormData(form);
+  const submit=form.querySelector('[type="submit"]');
+  submit.disabled=true;
+  try{
+    const {assigned}=await run({type:'agent-settings',auto:data.has('auto'),limit:Number(data.get('limit'))});
+    notify(assigned?'Агент назначил задач: '+m.number(assigned):'Настройки агента сохранены');
+  }catch(error){
+    const message=form.querySelector('.form-error');
+    message.textContent=error.message;
+    message.hidden=false;
+    submit.disabled=false;
+  }
+}
+async function runAgentNow(button){
+  if(!manager()||button.disabled)return;
+  button.disabled=true;
+  try{
+    const {assigned}=await run({type:'agent-cycle',branch:ui.branch});
+    notify(assigned?'Агент назначил задач: '+m.number(assigned):'Новых задач по правилам нет');
+  }catch(error){button.disabled=false;notify(error.message,true);}
+}
+
 function bookingWeek(){
   const day=m.today();
   const weekday=(new Date(day+'T12:00:00Z').getUTCDay()+6)%7;
@@ -186,7 +463,7 @@ function contactTable(rows){
         '<span><strong>'+s(c.name)+'</strong><small>'+s(m.byBranch(c.branch).name)+' · '+s(m.formatPhone(c.phone))+'</small></span></button></td>'+
         '<td><span class="work-action">'+s(summary)+'</span><small class="cell-note">'+s(reasonTitle(reason))+(row.task?.priority==='high'?' · высокий приоритет':'')+'</small></td>'+
         '<td class="nowrap">'+contactTime(row.due)+displayDueTime(row.task||{})+'</td><td class="row-end">'+button('Результат','phone','secondary small','quick-contact',
-          'data-id="'+s(c.id)+'" data-task="'+s(row.task?.id)+'" data-assignee="'+s(row.assignee)+'"')+'</td></tr>';
+          'data-id="'+s(c.id)+'"')+'</td></tr>';
     }).join('')+'</tbody></table></div>';
 }
 function compactPipeline(){
@@ -249,7 +526,7 @@ function home(){
   const eligible=m.metrics(state,ui.branch).attention;
   return heading('Рабочий стол','',
     '<span class="date-chip">'+icon('calendar',17)+s(cap(m.formatDate(day,{weekday:'long',day:'numeric',month:'long'})))+'</span>'+
-    button('Новая задача','plus','primary','new-task'))+
+    button('Обрабатывать контакты','phone','primary','navigate','data-id="contacts"'))+
     '<section class="stats work-stats" aria-label="Основные показатели">'+
     stat('Контакты к сроку',ready.length,late.length?'Просрочено: '+late.length:'На сегодня','phone','berry','home-filter','ready')+
     stat('Требуют внимания',eligible,'По правилам сегментации','target','pink','segment','focus')+
@@ -329,13 +606,13 @@ function clientsPage(){
     (a.lastVisit||'9999').localeCompare(b.lastVisit||'9999')||a.name.localeCompare(b.name,'ru'));
   const items=list.slice(0,ui.clientLimit).map(c=>{
     const gap=c.lastVisit?m.dateDiff(m.today(),c.lastVisit):null;
-    return '<tr><td><button class="identity" type="button" data-action="client" data-id="'+s(c.id)+'">'+clientAvatar(c)+'<span><strong>'+s(c.name)+'</strong><small>'+s(m.formatPhone(c.phone))+'</small></span></button></td>'+
+    return '<tr><td><button class="identity" type="button" data-action="desk-client" data-id="'+s(c.id)+'">'+clientAvatar(c)+'<span><strong>'+s(c.name)+'</strong><small>'+s(m.formatPhone(c.phone))+'</small></span></button></td>'+
       '<td>'+s(m.byBranch(c.branch).name)+'</td><td>'+s(c.lastVisit?m.longDate(c.lastVisit):'Нет данных')+(gap!==null?'<small class="cell-note">'+m.number(gap)+' дн. назад</small>':'')+'</td><td>'+badge(m.retentionReason(state,c),reasons)+
       (m.displayedReason(state,c)==='working'?'<small class="cell-note">Уже в работе</small>':'')+'</td>'+
       '<td class="row-end"><button class="row-button" type="button" data-action="client" data-id="'+s(c.id)+'" aria-label="'+s('Открыть карточку '+c.name)+'">'+icon('right',16)+'</button></td></tr>';
   }).join('');
-  return heading('Клиенты','',manager()?button('Импорт данных','upload','secondary','navigate','data-id="import"')+
-    button('Назначить обзвон','plus','primary','batch'):'')+
+  return heading('Клиенты','',button('Работа с клиентами','phone','primary','navigate','data-id="contacts"')+
+    (manager()?button('Импорт данных','upload','secondary','navigate','data-id="import"')+button('Назначить обзвон','plus','secondary','batch'):''))+
     '<section class="panel"><div class="toolbar">'+searchInput('Поиск по имени или телефону')+
     filterSelect('segment','Сегмент клиентов',[['','Все сегменты'],['focus','Требуют внимания'],...categoryOptions(clientCategories)],ui.segment)+
     filterSelect('clientSort','Порядок сортировки',[['attention','По давности визита'],['name','По имени']],ui.clientSort)+'</div>'+
@@ -500,7 +777,7 @@ function renderLogin(error=''){
     '<button type="submit" class="button primary wide">Войти</button></div></form></main>';
 }
 async function logout(){
-  try{await repository.logout();account=null;closeModal();renderLogin();}
+  try{await repository.logout();contactDrafts.clear();account=null;closeModal();renderLogin();}
   catch(error){notify(error.message,true);}
 }
 async function submitMain(event){
@@ -575,13 +852,14 @@ function importPage(){
     state.imports.slice(0,10).map(x=>'<tr><td>'+s(x.name)+'</td><td>'+s(m.longDate(x.date))+'</td><td>'+m.number(x.added)+'</td><td>'+m.number(x.updated??0)+'</td></tr>').join('')+'</tbody></table></div></section>':'');
 }
 
-const views={home,clients:clientsPage,tasks:tasksPage,pipeline:pipelinePage,visits:visitsPage,branches:branchesPage,analytics:analyticsPage,import:importPage,settings:settingsPage};
+const views={home,contacts:contactDeskPage,agent:agentPage,clients:clientsPage,tasks:tasksPage,pipeline:pipelinePage,visits:visitsPage,branches:branchesPage,analytics:analyticsPage,import:importPage,settings:settingsPage};
 function render(preserveFocus=false){
   const focused=preserveFocus&&document.activeElement?.id;
   const caret=focused==='query'?document.activeElement.selectionStart:null;
   if(serverMode&&!account){renderLogin();return;}
   if(managerPages.has(ui.page)&&!manager())ui.page='home';
   app.innerHTML=shell(views[ui.page]());
+  if(ui.page==='contacts')toggleOutcome(document.querySelector('#desk-contact-form'));
   document.title='GLAMOUR CRM — '+routes[ui.page][0];
   if(focused){
     const field=document.getElementById(focused);
@@ -648,7 +926,7 @@ function outcomeFields(data={},options=[['','Выберите результат
     '<div class="booking-fields form-grid">'+field('Дата повторной записи',input('appointment',data.appointment||'','date','required'))+
     field('Время',input('visitTime',data.visitTime||'','time'))+
     field('Услуга',input('service',data.service||'','text','maxlength="120" placeholder="Например, маникюр"'))+
-    field('Плановая сумма, ₽',input('plannedInput',moneyInput(data.planned),'text','maxlength="16" inputmode="decimal" placeholder="Например, 2 450"'))+'</div></div>';
+    field('Плановая сумма, ₽',input('plannedInput',data.plannedInput??moneyInput(data.planned),'text','maxlength="16" inputmode="decimal" placeholder="Например, 2 450"'))+'</div></div>';
 }
 function taskModal(id='',clientId=''){
   const task=state.tasks.find(item=>item.id===id);
@@ -674,11 +952,11 @@ function taskModal(id='',clientId=''){
     '<div class="form-error wide" role="alert" hidden></div></div>'+modalFoot(task?'Сохранить задачу':'Создать задачу',task?'check':'plus')+'</form>','task',{id,clientId});
   toggleOutcome();
 }
-function followUpFields(){
+function followUpFields(data={}){
   const day=m.today();
-  return '<div id="next-contact-date" class="field-group" hidden>'+
-    field('Следующий контакт',input('followUp',m.shiftDate(day,1),'date','min="'+day+'" required'))+
-    field('Время повторного звонка',input('followUpTime','','time'))+'</div>';
+  return '<div class="field-group" data-follow-up hidden>'+
+    field('Следующий контакт',input('followUp',data.followUp||m.shiftDate(day,1),'date','min="'+day+'" required'))+
+    field('Время повторного звонка',input('followUpTime',data.followUpTime||'','time'))+'</div>';
 }
 function quickContact(id,taskId='',assigned=''){
   const client=m.byClient(state,id);
@@ -792,8 +1070,7 @@ function toggleDealFields(){
   else visit.removeAttribute('min');
 }
 
-function toggleOutcome(){
-  const form=dialog.querySelector('form');
+function toggleOutcome(form=dialog.querySelector('form')){
   if(!form) return;
   const status=form.elements.namedItem('status');
   const result=form.elements.namedItem('result');
@@ -806,9 +1083,9 @@ function toggleOutcome(){
   form.elements.service.disabled=!booked;
   form.elements.visitTime.disabled=!booked;
   form.elements.plannedInput.disabled=!booked;
-  const next=dialog.querySelector('#next-contact-date');
+  const next=form.querySelector('[data-follow-up]');
   if(next){
-    const historical=modal?.type==='task'&&state.tasks.some(task=>task.id===modal.id&&task.status==='done'&&task.result===result.value);
+    const historical=form.id==='task-form'&&modal?.type==='task'&&state.tasks.some(task=>task.id===modal.id&&task.status==='done'&&task.result===result.value);
     next.hidden=!selected||!result.value||terminalResults.has(result.value)||historical;
     form.elements.followUp.disabled=next.hidden;
     form.elements.followUpTime.disabled=next.hidden;
@@ -842,13 +1119,13 @@ async function commitImport(){
   ui.importBusy=true;
   render();
   try{
-    const {added,updated,duplicates,conflicts}=await run({type:'import-clients',clients:ui.importPreview.records,filename:ui.importFile.name});
+    const {added,updated,duplicates,conflicts,assigned}=await run({type:'import-clients',clients:ui.importPreview.records,filename:ui.importFile.name});
     ui.importFile=null;
     ui.importLayout=null;
     ui.importMapping=null;
     ui.importPreview=null;
     go('clients',{segment:'focus'});
-    notify('Добавлено: '+m.number(added)+' · обновлено: '+m.number(updated)+(duplicates?' · без изменений: '+m.number(duplicates):'')+(conflicts?' · конфликты: '+m.number(conflicts):''));
+    notify('Добавлено: '+m.number(added)+' · обновлено: '+m.number(updated)+(duplicates?' · без изменений: '+m.number(duplicates):'')+(conflicts?' · конфликты: '+m.number(conflicts):'')+(assigned?' · задач от агента: '+m.number(assigned):''));
   }catch(err){ui.importError='Сохранение не удалось. '+err.message;}
   finally{ui.importBusy=false;render();}
 }
@@ -892,14 +1169,21 @@ document.addEventListener('click',event=>{
     case 'profile': profileModal();break;
     case 'switch-profile': {
       if(serverMode||!m.byPerson(id,rawState))break;
-      ui.profile=id;ui.branch='';useSnapshot(rawState);savePrefs();closeModal();go(manager()?'analytics':'home');break;
+      contactDrafts.clear();ui.profile=id;ui.branch='';useSnapshot(rawState);savePrefs();closeModal();go(manager()?'analytics':'home');break;
     }
     case 'logout': void logout();break;
     case 'client': clientModal(id);break;
     case 'new-task': taskModal('',id);break;
     case 'edit-task': taskModal(id);break;
     case 'call': quickContact(id);break;
-    case 'quick-contact': quickContact(id,element.dataset.task||'',element.dataset.assignee||'');break;
+    case 'quick-contact':
+    case 'desk-client': openContactDesk(id);break;
+    case 'desk-tab': selectDeskTab(id);break;
+    case 'desk-move': moveDesk(id);break;
+    case 'copy-desk-phone': void copyDeskPhone(id);break;
+    case 'agent-step': applyAgentStep(id);break;
+    case 'agent-rate': void rateAgent(element);break;
+    case 'run-agent': void runAgentNow(element);break;
     case 'quick-search': quickSearch();break;
     case 'batch': if(manager())batchModal();break;
     case 'reset-demo':
@@ -929,11 +1213,21 @@ document.addEventListener('keydown',event=>{
   }
 });
 document.addEventListener('input',event=>{
+  rememberDeskField(event.target);
   if(event.target.id==='quick-query')updateQuickSearch();
   if(event.target.dataset.filter==='query'){ui.query=event.target.value;ui.clientLimit=12;ui.taskLimit=15;ui.dealLimit=12;render(true);}
 });
 document.addEventListener('change',event=>{
   const field=event.target;
+  if(field.id==='agent-option'){
+    const {row}=deskSelection();if(row){deskDraft(row).values.option=field.value;refreshAgentSuggestion();}
+    return;
+  }
+  if(field.form?.id==='desk-contact-form'){
+    rememberDeskField(field);
+    if(field.name==='result')toggleOutcome(field.form);
+    return;
+  }
   if(field.dataset.map){
     if(field.value==='')delete ui.importMapping[field.dataset.map];
     else ui.importMapping[field.dataset.map]=Number(field.value);
@@ -1019,7 +1313,7 @@ dialog.addEventListener('submit',async event=>{
       notify(message);
     }
     if(current.type==='reset'){
-      await run({type:'reset-demo'});closeModal();go('home');notify('Демоданные восстановлены');
+      await run({type:'reset-demo'});contactDrafts.clear();closeModal();go('home');notify('Демоданные восстановлены');
     }
     if(current.type==='batch'){
       const result=await run({type:'assign-outreach',...data,count:Number(data.count)});
@@ -1034,7 +1328,11 @@ dialog.addEventListener('submit',async event=>{
   }
 });
 
-app.addEventListener('submit',submitMain);
+app.addEventListener('submit',event=>{
+  if(event.target.id==='desk-contact-form'){event.preventDefault();void saveDeskResult(event);}
+  else if(event.target.id==='agent-settings-form'){event.preventDefault();void saveAgentSettings(event.target);}
+  else void submitMain(event);
+});
 applyTheme();
 try {
   if(serverMode){

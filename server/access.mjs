@@ -14,6 +14,7 @@ export function visibleState(state,person){
   return {...state,clients,
     tasks:state.tasks.filter(task=>ids.has(task.clientId)),
     opportunities:state.opportunities.filter(deal=>ids.has(deal.clientId)),imports:[],
+    agent:{...state.agent,lastRun:null,feedback:state.agent.feedback.filter(item=>allowed.has(item.branch))},
     settings:{rules:settings.rules,branches:settings.branches.filter(branch=>allowed.has(branch.id)),
       users:settings.users.filter(user=>assignedBranches(user).some(id=>allowed.has(id)))}
   };
@@ -42,11 +43,16 @@ export function commandFor(state,input,identity,{demo=false}={}){
     case 'import-clients':
     case 'assign-outreach':
     case 'save-settings':
+    case 'agent-cycle':
+    case 'agent-settings':
       if(!manager)denied();
       return {...input,actor:identity,demoOnly:demo};
     case 'reset-demo':
       if(!manager||!demo)denied();
       return {type,actor:identity};
+    case 'agent-feedback':
+      clientAccess(input.clientId);
+      return {type,clientId:input.clientId,objection:input.objection,option:input.option,helpful:input.helpful,actor:identity};
     case 'save-task': {
       const task=input.task;
       if(!task||typeof task!=='object')denied();
