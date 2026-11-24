@@ -76,7 +76,8 @@ export async function readFile(file,excelApi){
     return {rows:parseCsv(text),sheet:''};
   }
   const xlsx=excelApi??await loadExcel();
-  const workbook=xlsx.read(bytes,{type:'array',cellDates:true});
+  // Keep Excel calendar dates as serials to avoid shifting the day with local time zones.
+  const workbook=xlsx.read(bytes,{type:'array',cellDates:false});
   for(const sheet of workbook.SheetNames){
     const rows=xlsx.utils.sheet_to_json(workbook.Sheets[sheet],{header:1,defval:'',raw:true,blankrows:true});
     if(rows.some(row=>row.some(cell=>String(cell).trim()))) return {rows,sheet,date1904:workbook.Workbook?.WBProps?.date1904===true};
