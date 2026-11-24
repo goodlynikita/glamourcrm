@@ -1,4 +1,4 @@
-import {agentState,contactBrief,identifyObjection,objections,recommend} from './agent.mjs?v=9';
+import {agentState,contactBrief,identifyObjection,objections,recommend} from './agent.mjs?v=10';
 import {contactGroups,contactTabs,nextContact} from './contact-desk.mjs';
 import {priorities,reasons,rulesFields,segmentKeys,terminalResults} from './retention.mjs?v=9';
 import {icon} from './icons.mjs';
@@ -130,7 +130,7 @@ function shell(contents){
   const taskCount=m.queue(state,{branch:ui.branch,assignee:mine(),status:'open'}).length;
   const themeIcon=ui.theme==='light'?'moon':'sun';
   const themeLabel=ui.theme==='light'?'Включить тёмную тему':'Включить светлую тему';
-  return '<div class="layout"><aside class="sidebar'+(ui.mobileNav?' mobile-open':'')+'"><a href="#home" class="brand" data-action="navigate" data-id="home" aria-label="GLAMOUR, на главную">'+wordmark+'</a>'+
+  return '<div class="layout"><aside class="sidebar'+(ui.mobileNav?' mobile-open':'')+'">'+
     '<div class="workspace"><span class="workspace-logo">'+icon('building',18)+'</span><span><strong>Сеть салонов</strong><small>GLAMOUR · Ижевск</small></span></div>'+
     '<nav aria-label="Разделы"><p class="nav-caption">РАБОЧЕЕ ПРОСТРАНСТВО</p>'+navEntry('home')+navEntry('contacts',taskCount)+navEntry('clients')+
     (manager()?'<p class="nav-caption tools-caption">УПРАВЛЕНИЕ</p>'+navEntry('agent')+navEntry('import')+navEntry('settings'):'')+'</nav>'+
