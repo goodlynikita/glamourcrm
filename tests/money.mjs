@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {moneyAudit} from '../dist/money-audit.mjs';
+import {branchMoney,canStartReturn,paymentBuckets,paymentPeriods} from '../dist/work-analytics.mjs';
 import {applyCommand,clientHistory,lastKnownVisit,seed,shiftDate,today} from '../dist/model.mjs';
 import {parseCsv,previewRows} from '../dist/importer.mjs';
 import {analysisInput,askForAnalysis} from '../server/ai.mjs';
@@ -8,6 +9,34 @@ import {commandFor,visibleState} from '../server/access.mjs';
 
 const day=today();
 const past=shiftDate(day,-100);
+
+test('revenue chart covers each day exactly once and includes today',()=>{
+  for(const period of paymentPeriods){
+    const outside=[{date:shiftDate(day,-period),amount:9999},{date:shiftDate(day,1),amount:9999}];
+    const records=Array.from({length:period},(_,index)=>({date:shiftDate(day,-index),amount:100+index}));
+    const buckets=paymentBuckets([...outside,...records],day,period);
+    assert.equal(buckets[0].from,shiftDate(day,1-period));
+    assert.equal(buckets.at(-1).through,day);
+    assert.equal(buckets.reduce((sum,bucket)=>sum+bucket.count,0),period);
+    assert.equal(buckets.reduce((sum,bucket)=>sum+bucket.amount,0),records.reduce((sum,entry)=>sum+entry.amount,0));
+    assert(buckets.slice(1).every((bucket,index)=>bucket.from===shiftDate(buckets[index].through,1)));
+  }
+});
+
+test('branch breakdown keeps paid and estimated amounts separate and priority excludes unavailable rows',()=>{
+  const branches=[{id:'center'},{id:'north'}];
+  const rows=[
+    {client:{id:'one',branch:'center'},amount:60000,working:false,contactable:true,paused:false},
+    {client:{id:'two',branch:'center'},amount:30000,working:true,contactable:true,paused:false},
+    {client:{id:'three',branch:'north'},amount:null,working:false,contactable:true,paused:true},
+    {client:{id:'four',branch:'north'},amount:10000,working:false,contactable:false,paused:false}
+  ];
+  const recorded=[{clientId:'one',amount:38500},{clientId:'three',amount:56000},{clientId:'other',amount:90000}];
+  const result=branchMoney({rows,recorded},branches,new Map(rows.map(row=>[row.client.id,row.client.branch])));
+  assert.deepEqual(result.map(group=>[group.branch.id,group.amount,group.confirmed,group.count,group.priced]),
+    [['center',90000,38500,2,2],['north',10000,56000,2,1]]);
+  assert.deepEqual(rows.filter(canStartReturn).map(row=>row.client.id),['one']);
+});
 const client=(id,fields={})=>({
   id,name:'Демо '+id,branch:'center',service:'Маникюр',lastVisit:past,
   visitCount:2,phone:'70000000101',history:[],...fields
