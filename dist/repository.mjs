@@ -1,4 +1,4 @@
-import {applyCommand, seed} from './model.mjs';
+import {applyCommand, seed, upgradeState} from './model.mjs';
 
 export const storageKey='glamour-crm-v1';
 
@@ -8,7 +8,7 @@ export class BrowserRepository {
   }
   async read(){
     const saved=this.storage.getItem(storageKey);
-    return saved ? JSON.parse(saved) : seed();
+    return saved ? upgradeState(JSON.parse(saved)) : seed();
   }
   async dispatch(command){
     const update=async()=>{

@@ -1,4 +1,6 @@
 const paths={
+  funnel:'<path d="M3 4h18l-7 8v5l-4 3v-8Z"/>',
+  wallet:'<rect x="3" y="5" width="18" height="15" rx="3"/><path d="M20 10h-5a2 2 0 1 0 0 4h5m-5-2h.1M5 5l11-2"/>',
   grid:'<rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/>',
   users:'<path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2m20 0v-2a4 4 0 0 0-3-3.9M16 3.1a4 4 0 0 1 0 7.8"/><circle cx="9" cy="7" r="4"/>',
   checkList:'<rect x="5" y="4" width="15" height="17" rx="2"/><path d="M9 4V2m6 2V2m-6 11 2 2 5-5"/>',

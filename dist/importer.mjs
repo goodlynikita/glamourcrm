@@ -11,7 +11,7 @@ const aliases = {
 };
 const normalize = text=>String(text??'').toLowerCase().trim().replace(/ё/g,'е').replace(/[._-]+/g,' ').replace(/\s+/g,' ');
 const aliasesIndex=new Map(Object.entries(aliases).flatMap(([key,titles])=>titles.map(title=>[title,key])));
-export const sampleCsv='\uFEFFФИО;Телефон;Филиал;Дата последнего визита;Дата регистрации;Услуга\r\nМилана Снежина;+7 (000) 000-04-01;Арбат;2026-07-15;2025-10-20;Стрижка\r\nЭльвира Ясенева;+7 (000) 000-04-02;Сокол;;2025-10-21;\r\n';
+export const sampleCsv='\uFEFFФИО;Телефон;Филиал;Дата последнего визита;Дата регистрации;Услуга\r\nМилана Снежина;+7 (000) 000-04-01;Центр;2026-07-15;2025-10-20;Маникюр\r\nЭльвира Ясенева;+7 (000) 000-04-02;Север;;2025-10-21;\r\n';
 
 function parseDelimited(text,delimiter){
   const rows=[];
@@ -125,7 +125,7 @@ export function previewRows(rows,existing,fallback,options={}){
     const value=key=>row[fields[key]]??'';
     const str=key=>String(value(key)).trim();
     const branchInput=normalize(str('branch'));
-    const branch=branchInput?branches.find(item=>[item.id,normalize(item.name),normalize(item.label)].includes(branchInput))?.id:fallback;
+    const branch=branchInput?branches.find(item=>[item.id,item.name,item.label,...item.aliases].some(alias=>normalize(alias)===branchInput))?.id:fallback;
     const phoneInput=str('phone');
     const phone=phoneKey(phoneInput);
     const name=str('name');

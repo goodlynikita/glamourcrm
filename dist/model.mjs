@@ -1,7 +1,9 @@
+import {parseMoney, releaseBooking, seedDeals, syncBooking, validDate, writeDeal} from './finance.mjs';
+
 export const branches = [
-  {id:'center',name:'Арбат',label:'GLAMOUR Арбат',color:'violet'},
-  {id:'north',name:'Сокол',label:'GLAMOUR Сокол',color:'lavender'},
-  {id:'south',name:'Парк Культуры',label:'GLAMOUR Парк Культуры',color:'pink'}
+  {id:'center',name:'Центр',label:'GLAMOUR Центр',aliases:['Арбат','GLAMOUR Арбат'],color:'berry'},
+  {id:'north',name:'Север',label:'GLAMOUR Север',aliases:['Сокол','GLAMOUR Сокол'],color:'blush'},
+  {id:'south',name:'Юг',label:'GLAMOUR Юг',aliases:['Парк Культуры','GLAMOUR Парк Культуры'],color:'pink'}
 ];
 export const people = [
   {id:'alina',name:'Алина Морозова',initials:'АМ',role:'Администратор',branch:'center'},
@@ -11,7 +13,7 @@ export const people = [
 ];
 export const statuses = {
   new:{label:'К выполнению',tone:'amber'},
-  progress:{label:'В работе',tone:'violet'},
+  progress:{label:'В работе',tone:'berry'},
   done:{label:'Выполнена',tone:'green'}
 };
 export const outcomes = {
@@ -61,54 +63,55 @@ export function segment(client, day=today()){
 }
 
 const clientsSeed = [
-  ['Елена Воронцова','center',106,'Окрашивание волос'],
-  ['Виктория Ланская','center',78,'Уход за волосами'],
+  ['Елена Воронцова','center',106,'Маникюр с покрытием'],
+  ['Виктория Ланская','center',78,'Укрепление ногтей'],
   ['Дарья Белова','north',132,'Маникюр'],
-  ['Ольга Соколова','center',63,'Стрижка'],
+  ['Ольга Соколова','center',63,'Маникюр и снятие'],
   ['Анна Крылова','south',null,''],
-  ['Ксения Орлова','north',59,'Укладка'],
+  ['Ксения Орлова','north',59,'Маникюр с дизайном'],
   ['Марина Цветкова','south',96,'Педикюр'],
-  ['Ирина Павлова','center',29,'Окрашивание волос'],
+  ['Ирина Павлова','center',29,'Маникюр с покрытием'],
   ['Полина Миронова','center',93,'Маникюр'],
-  ['Анастасия Нечаева','north',84,'Стрижка'],
-  ['Алла Смирнова','south',20,'Массаж лица'],
-  ['Нина Захарова','north',9,'Уход за волосами'],
+  ['Анастасия Нечаева','north',84,'Маникюр и снятие'],
+  ['Алла Смирнова','south',20,'Маникюр без покрытия'],
+  ['Нина Захарова','north',9,'Укрепление ногтей'],
   ['Людмила Осипова','center',null,''],
-  ['Татьяна Егорова','south',52,'Оформление бровей'],
-  ['Светлана Власова','north',120,'Окрашивание волос'],
-  ['Валерия Астахова','center',102,'Уход за волосами'],
-  ['Юлия Родина','center',67,'Оформление бровей'],
+  ['Татьяна Егорова','south',52,'Маникюр с дизайном'],
+  ['Светлана Власова','north',120,'Маникюр с покрытием'],
+  ['Валерия Астахова','center',102,'Укрепление ногтей'],
+  ['Юлия Родина','center',67,'Маникюр с дизайном'],
   ['Диана Степанова','center',113,'Маникюр'],
   ['Вероника Литвинова','north',71,'Маникюр'],
   ['Зоя Карпова','north',null,''],
-  ['Вера Котова','south',99,'Укладка'],
-  ['Кристина Громова','south',45,'Уход за волосами'],
+  ['Вера Котова','south',99,'Маникюр с дизайном'],
+  ['Кристина Громова','south',45,'Укрепление ногтей'],
   ['Надежда Михайлова','north',28,'Педикюр'],
-  ['Элина Мельникова','center',13,'Окрашивание волос']
+  ['Элина Мельникова','center',13,'Маникюр с покрытием']
 ];
 const taskSeed = [
-  [1,'Уточнить планы на окрашивание','alina',0,'new'],
+  [1,'Уточнить планы на маникюр','alina',0,'new'],
   [2,'Предложить повторный визит','alina',0,'progress'],
   [3,'Вернуть клиента после перерыва','maria',0,'new'],
   [4,'Уточнить удобное время визита','alina',1,'new'],
   [5,'Уточнить историю посещений','sofia',2,'progress'],
-  [6,'Предложить запись на укладку','maria',1,'new'],
-  [7,'Напомнить про сезонный уход','sofia',3,'new'],
+  [6,'Предложить запись на дизайн','maria',1,'new'],
+  [7,'Напомнить про педикюр','sofia',3,'new'],
   [9,'Предложить время на маникюр','alina',-1,'new'],
   [13,'Проверить данные клиента','alina',3,'new'],
   [15,'Перезвонить по записи','maria',-2,'progress'],
-  [16,'Пригласить на уход за волосами','alina',0,'new'],
+  [16,'Пригласить на укрепление ногтей','alina',0,'new'],
   [17,'Связаться по повторной записи','alina',2,'new'],
   [18,'Уточнить планы на маникюр','alina',4,'new'],
-  [8,'Записать на окрашивание','alina',-3,'done','booked'],
-  [10,'Согласовать время стрижки','maria',-5,'done','booked'],
-  [11,'Предложить время на массаж','sofia',-4,'done','declined'],
+  [8,'Записать на маникюр','alina',-3,'done','booked'],
+  [10,'Согласовать время снятия и покрытия','maria',-5,'done','booked'],
+  [11,'Предложить время на маникюр','sofia',-4,'done','declined'],
   [12,'Уточнить удобное время визита','maria',-1,'done','no_answer'],
-  [14,'Записать на оформление бровей','sofia',-2,'done','booked']
+  [14,'Записать на маникюр с дизайном','sofia',-2,'done','booked']
 ];
 export function seed(day=today()){
   return {
-    version:1,
+    version:2,
+    opportunities:seedDeals(day,shiftDate),
     clients:clientsSeed.map(([name,branch,age,service],index)=>({
       id:'c'+(index+1),name,branch,phone:'7000000'+String(index+1).padStart(4,'0'),
       registered:shiftDate(day,-300-index*3),lastVisit:age===null?'':shiftDate(day,-age),
@@ -139,6 +142,14 @@ export function matches(client,query){
   const digits=q.replace(/\D/g,'');
   return client.name.toLowerCase().includes(q) || (digits.length>=3 && client.phone.includes(digits));
 }
+export function lastKnownVisit(state,client){
+  const visits=state.opportunities.filter(deal=>deal.clientId===client.id&&deal.stage==='paid')
+    .sort((a,b)=>b.visitDate.localeCompare(a.visitDate));
+  const latest=visits[0];
+  return latest&&latest.visitDate>=client.lastVisit?{lastVisit:latest.visitDate,service:latest.service||client.service}:client;
+}
+export const clientSegment=(state,client,day=today())=>segment(lastKnownVisit(state,client),day);
+
 export function metrics(state,branch='',period=30,day=today(),assignee=''){
   const clients=state.clients.filter(client=>!branch||client.branch===branch);
   const tasks=queue(state,{branch,assignee,day});
@@ -146,7 +157,7 @@ export function metrics(state,branch='',period=30,day=today(),assignee=''){
   const contacts=clients.flatMap(client=>clientHistory(state,client).filter(event=>event.kind==='call'
     && event.date>=shiftDate(day,1-period) && event.date<=day
     && (!assignee||event.assignee===assignee)));
-  return {total:clients.length,attention:clients.filter(client=>segment(client,day)!=='active').length,
+  return {total:clients.length,attention:clients.filter(client=>clientSegment(state,client,day)!=='active').length,
     today:tasks.filter(task=>task.status!=='done' && task.due===day).length,
     open:tasks.filter(task=>task.status!=='done').length,
     late:tasks.filter(task=>task.status!=='done' && task.due<day).length,
@@ -156,31 +167,62 @@ export function clientHistory(state,client){
   const visits=client.lastVisit?[{kind:'visit',date:client.lastVisit,title:client.service||'Посещение салона'}]:[];
   const calls=state.tasks.filter(task=>task.clientId===client.id && task.result).map(task=>({
     kind:'call',date:task.closed,result:task.result,assignee:task.assignee,
-    note:task.note,appointment:task.appointment,service:task.service
+    note:task.note,appointment:task.appointment,service:task.service,planned:task.planned
   }));
-  return [...client.history,...calls,...visits].sort((a,b)=>b.date.localeCompare(a.date));
+  const payments=state.opportunities.filter(deal=>deal.clientId===client.id&&deal.stage==='paid').map(deal=>({
+    kind:'payment',date:deal.paymentDate,assignee:deal.assignee,amount:deal.actual,service:deal.service,visitDate:deal.visitDate
+  }));
+  return [...client.history,...calls,...payments,...visits].sort((a,b)=>b.date.localeCompare(a.date));
 }
 export function focusClients(state,branch=''){
-  return state.clients.filter(client=>(!branch||client.branch===branch)&&segment(client)!=='active')
-    .sort((a,b)=>(a.lastVisit||'9999').localeCompare(b.lastVisit||'9999')||a.name.localeCompare(b.name,'ru'));
+  return state.clients.filter(client=>(!branch||client.branch===branch)&&clientSegment(state,client)!=='active')
+    .sort((a,b)=>(lastKnownVisit(state,a).lastVisit||'9999').localeCompare(lastKnownVisit(state,b).lastVisit||'9999')||a.name.localeCompare(b.name,'ru'));
+}
+
+export function upgradeState(state){
+  if(Array.isArray(state.opportunities))return state;
+  const next={...state,version:2,opportunities:[]};
+  const bookings=[];
+  for(const task of state.tasks){
+    if(task.result==='booked'&&task.appointment)bookings.push({event:task,clientId:task.clientId,reference:'task:'+task.id,date:task.closed});
+  }
+  for(const client of state.clients){
+    for(const event of client.history){
+      if(event.result==='booked'&&event.appointment)bookings.push({event,clientId:client.id,reference:'call:'+event.id,date:event.date});
+    }
+  }
+  bookings.sort((a,b)=>a.date.localeCompare(b.date));
+  for(const {event,clientId,reference,date} of bookings){
+    syncBooking(next,event,{reference,clientId,day:date,newId:()=>reference});
+  }
+  return next;
 }
 
 export function applyCommand(state,command){
-  const next=structuredClone(state);
+  const next=structuredClone(upgradeState(state));
   const day=today();
   switch(command.type){
+    case 'save-deal': {
+      const {values}=command;
+      writeDeal(next,values,{client:byClient(next,values.clientId),assigneeExists:Boolean(byPerson(values.assignee)?.branch),day,newId});
+      break;
+    }
     case 'save-task': {
       const {id,clientId,title,assignee,due,status,result,note,appointment,service}=command.task;
       if(!byClient(next,clientId) || !byPerson(assignee)?.branch || !title.trim() || !due || !statuses[status]){
         throw new Error('Заполните обязательные поля задачи.');
       }
       if(status==='done' && !outcomes[result]) throw new Error('Выберите результат звонка.');
-      if(status==='done' && result==='booked' && !appointment) throw new Error('Укажите дату повторной записи.');
+      if(status==='done' && result==='booked' && !validDate(appointment)) throw new Error('Укажите дату повторной записи.');
       const old=next.tasks.find(task=>task.id===id);
       const closed=status==='done'?(old?.closed||day):'';
       const task={id:id||newId(),clientId,title:title.trim(),assignee,due,status,created:old?.created||day,
         closed,result:closed?result:'',note:note.trim(),
-        appointment:closed&&result==='booked'?appointment:'',service:closed&&result==='booked'?service.trim():''};
+        appointment:closed&&result==='booked'?appointment:'',service:closed&&result==='booked'?service.trim():'',
+        planned:closed&&result==='booked'?(command.task.plannedInput===undefined?old?.planned??null:parseMoney(command.task.plannedInput)):null};
+      const reference='task:'+task.id;
+      if(old?.result==='booked'&&(task.result!=='booked'||old.clientId!==clientId))releaseBooking(next,reference,old.clientId,day);
+      if(task.result==='booked')syncBooking(next,task,{reference,clientId,day,newId});
       if(old) next.tasks[next.tasks.indexOf(old)]=task;
       else next.tasks.push(task);
       break;
@@ -189,9 +231,12 @@ export function applyCommand(state,command){
       const client=byClient(next,command.clientId);
       const {result,assignee,note,appointment,service}=command.event;
       if(!client || !outcomes[result]) throw new Error('Выберите результат звонка.');
-      if(result==='booked'&&!appointment) throw new Error('Укажите дату повторной записи.');
-      client.history.unshift({id:newId(),kind:'call',date:day,result,assignee,note:note.trim(),
-        appointment:result==='booked'?appointment:'',service:result==='booked'?service.trim():''});
+      if(result==='booked'&&!validDate(appointment)) throw new Error('Укажите дату повторной записи.');
+      const event={id:newId(),kind:'call',date:day,result,assignee,note:note.trim(),
+        appointment:result==='booked'?appointment:'',service:result==='booked'?service.trim():'',
+        planned:result==='booked'?parseMoney(command.event.plannedInput):null};
+      client.history.unshift(event);
+      if(result==='booked')syncBooking(next,event,{reference:'call:'+event.id,clientId:client.id,day,newId});
       break;
     }
     case 'import-clients': {
