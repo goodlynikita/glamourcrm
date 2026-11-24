@@ -1,4 +1,4 @@
-import {applyCommand, seed, upgradeState} from './model.mjs';
+import {applyCommand, seed, upgradeState} from './model.mjs?v=9';
 
 export const storageKey='glamour-crm-v1';
 

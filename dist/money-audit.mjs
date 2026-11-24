@@ -84,9 +84,10 @@ export function moneyAudit(state,{branch='',day,period=30}){
     const service=pastVisit?.visitDate===recentVisit?pastVisit.service||client.service:client.service;
     const estimated=service?medians.get(serviceKey(client,service)):null;
     const price=direct.get(client.id)??(estimated?{basis:'benchmark',amount:estimated}:{basis:'',amount:null});
-    const row={client,...price,reason,lastVisit:recentVisit,service,working:active.has(client.id),
+    const waitingForClient=Boolean(client.waitingForClientSince&&recentVisit<=client.waitingForClientSince);
+    const row={client,...price,reason,lastVisit:recentVisit,service,working:active.has(client.id),waitingForClient,
       contactable:Boolean(client.phone&&!client.invalidPhone&&!client.callBlocked),
-      paused:recentContacts.has(client.id)||client.history?.some(event=>event.kind==='call'&&event.date>recent)||false};
+      paused:waitingForClient||recentContacts.has(client.id)||client.history?.some(event=>event.kind==='call'&&event.date>recent)||false};
     rows.push(row);
     if(!groups.has(reason))groups.set(reason,{reason,count:0,amount:0,priced:0});
     const group=groups.get(reason);
