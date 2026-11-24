@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {identifyObjection,recommend} from '../dist/agent.mjs';
-import {applyCommand,seed,shiftDate,today} from '../dist/model.mjs';
+import {contactBrief,identifyObjection,recommend} from '../dist/agent.mjs';
+import {applyCommand,retentionReason,seed,shiftDate,today} from '../dist/model.mjs';
 import {contactGroups,nextContact} from '../dist/contact-desk.mjs';
 import {commandFor,visibleState} from '../server/access.mjs';
 
@@ -14,6 +14,7 @@ const sample=[
 ];
 test('suggestions use branch feedback and honor contact opt-out',()=>{
   assert.equal(identifyObjection('Мне дорого'), 'price');
+  assert.equal(identifyObjection('Мне нужно дешевле, дорого'), 'price');
   assert.equal(identifyObjection('Плохо сделали и слишком дорого'), 'quality');
   assert.equal(identifyObjection('Уберите номер, не звоните больше'), 'stop');
   assert.equal(recommend('Не звоните').options[0].outcome,'do_not_contact');
@@ -21,6 +22,28 @@ test('suggestions use branch feedback and honor contact opt-out',()=>{
   const result=recommend('Дорого',[{branch:'center',option:old,objection:'price',helpful:false}],'center');
   assert.notEqual(result.options[0].id,old);
   assert.equal(recommend('Дорого',[{branch:'center',option:old,objection:'price',helpful:false}],'north').options[0].id,old);
+  assert.equal(recommend('Сейчас работаю, перезвоните завтра').options[0].outcome,'callback');
+  assert.equal(recommend('Больше не перезванивайте').options[0].outcome,'do_not_contact');
+});
+
+test('demo queue opens with a tailored script and varied examples, while imported clients get factual guidance',()=>{
+  const state=seed(day);
+  const queue=contactGroups(state,{day}).ready;
+  const scripts=queue.map(row=>{
+    const client=state.clients.find(item=>item.id===row.clientId);
+    const script=contactBrief({client,reason:retentionReason(state,client,day),service:client.service});
+    assert(script.opening.includes(client.name.split(' ')[0]));
+    assert(script.goal&&script.example);
+    assert.doesNotMatch(script.opening,/\{[^}]+\}/);
+    return identifyObjection(script.example);
+  });
+  assert(scripts.includes('price')&&scripts.includes('quality')&&scripts.includes('location')&&scripts.includes('provider'));
+  const script=contactBrief({client:{id:'c15',name:'Ирина Пример',source:'import'},reason:'unknown'});
+  assert.match(script.opening,/вы уже бывали у нас/);
+  assert.equal(script.example,null);
+  const repeat=contactBrief({client:state.clients[0],reason:'single',previousResult:'no_answer',followUp:true});
+  assert.match(repeat.opening,/пыталась с вами связаться/);
+  assert.equal(recommend(repeat.example).options[0].outcome,'callback');
 });
 
 test('automatic assignment respects daily limits, future bookings and staff permissions',()=>{
