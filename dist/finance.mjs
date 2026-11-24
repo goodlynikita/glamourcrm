@@ -21,6 +21,7 @@ export function validDate(value){
   const time=Date.parse(value+'T00:00:00Z');
   return Number.isFinite(time)&&new Date(time).toISOString().slice(0,10)===value;
 }
+const validTime=value=>!value||/^([01]\d|2[0-3]):[0-5]\d$/.test(value);
 export const actionDate=deal=>deal.stage==='booked'?deal.visitDate:deal.due;
 export function nextStep(deal,day){
   if(deal.stage==='booked')return deal.visitDate<day?'Проверить результат визита':
@@ -67,6 +68,8 @@ export function writeDeal(state,values,{client,assigneeExists,day,newId}){
   const due=stage==='contact'||stage==='interested'?String(values.due??''):'';
   const visitDate=stage==='booked'||stage==='paid'?String(values.visitDate??''):'';
   const paymentDate=stage==='paid'?String(values.paymentDate??''):'';
+  const visitTime=visitDate?String(values.visitTime??old?.visitTime??''):'';
+  if(!validTime(visitTime))throw new Error('Проверьте время записи.');
   const reason=stage==='lost'?String(values.reason??'').trim():'';
   if(due&&!validDate(due))throw new Error('Проверьте дату следующего шага.');
   if((stage==='booked'||stage==='paid')&&!validDate(visitDate))throw new Error('Укажите дату визита.');
@@ -77,7 +80,7 @@ export function writeDeal(state,values,{client,assigneeExists,day,newId}){
   const deal={
     id:old?.id||newId(),clientId:client.id,assignee:values.assignee,stage,
     service:String(values.service??'').trim(),note:String(values.note??'').trim(),planned,actual,
-    due,visitDate,paymentDate,reason,created:old?.created||day,updated:day,
+    due,visitDate,visitTime,paymentDate,reason,created:old?.created||day,updated:day,
     bookingRef:old?.bookingRef||'',resumeStage:old?.resumeStage||'',resumeDue:old?.resumeDue||''
   };
   if(old)state.opportunities[state.opportunities.indexOf(old)]=deal;
@@ -91,9 +94,10 @@ export function releaseBooking(state,reference,clientId,day){
 export function syncBooking(state,booking,{reference,clientId,day,newId}){
   const linked=state.opportunities.find(item=>item.bookingRef===reference&&item.clientId===clientId);
   if(linked&&!isOpen(linked))return;
+  if(!validTime(booking.visitTime))throw new Error('Проверьте время записи.');
   const deal=linked||state.opportunities.find(item=>item.clientId===clientId&&isOpen(item));
   const items={
-    stage:'booked',visitDate:booking.appointment,updated:day,bookingRef:reference,due:'',
+    stage:'booked',visitDate:booking.appointment,visitTime:booking.visitTime||'',updated:day,bookingRef:reference,due:'',
     resumeStage:(deal?.stage==='booked'?deal.resumeStage:deal?.stage)||'',
     resumeDue:(deal?.stage==='booked'?deal.resumeDue:deal?.due)||'',
     assignee:booking.assignee,service:booking.service||deal?.service||'',
@@ -129,6 +133,7 @@ export function seedDeals(day,shiftDate){
     return {id:'d'+(index+1),clientId:'c'+client,assignee,stage,service,
       planned:amount===null?null:amount*100,actual:stage==='paid'?reference*100:null,
       due:stage==='contact'||stage==='interested'?date:'',visitDate:stage==='booked'||stage==='paid'?date:'',
+      visitTime:stage==='booked'?['10:30','12:00','14:30','16:00'][index%4]:'',
       paymentDate:stage==='paid'?date:'',reason:stage==='lost'?'Клиент перенёс планы':'',note:'',
       created:shiftDate(day,Math.min(-7,offset-2)),updated:stage==='paid'?date:shiftDate(day,-2),
       bookingRef:stage==='booked'&&typeof reference==='string'?reference:'',resumeStage:'',resumeDue:''

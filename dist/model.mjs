@@ -1,4 +1,4 @@
-import {parseMoney, releaseBooking, seedDeals, syncBooking, validDate, writeDeal} from './finance.mjs';
+import {isOpen,parseMoney,releaseBooking,seedDeals,selectDeals,syncBooking,validDate,writeDeal} from './finance.mjs';
 
 export const branches = [
   {id:'center',name:'Центр',label:'GLAMOUR Центр',aliases:['Арбат','GLAMOUR Арбат'],color:'berry'},
@@ -86,7 +86,10 @@ const clientsSeed = [
   ['Вера Котова','south',99,'Маникюр с дизайном'],
   ['Кристина Громова','south',45,'Укрепление ногтей'],
   ['Надежда Михайлова','north',28,'Педикюр'],
-  ['Элина Мельникова','center',13,'Маникюр с покрытием']
+  ['Элина Мельникова','center',13,'Маникюр с покрытием'],
+  ['Лидия Берёзкина','center',121,'Маникюр и снятие'],
+  ['Майя Синицына','north',100,'Педикюр'],
+  ['Яна Васнецова','south',76,'Маникюр с покрытием']
 ];
 const taskSeed = [
   [1,'Уточнить планы на маникюр','alina',0,'new'],
@@ -140,7 +143,7 @@ export function matches(client,query){
   const q=query.trim().toLowerCase();
   if(!q) return true;
   const digits=q.replace(/\D/g,'');
-  return client.name.toLowerCase().includes(q) || (digits.length>=3 && client.phone.includes(digits));
+  return client.name.toLowerCase().includes(q) || (digits.length>=3 && client.phone.includes(phoneKey(digits)||digits));
 }
 export function lastKnownVisit(state,client){
   const visits=state.opportunities.filter(deal=>deal.clientId===client.id&&deal.stage==='paid')
@@ -179,6 +182,52 @@ export function focusClients(state,branch=''){
     .sort((a,b)=>(lastKnownVisit(state,a).lastVisit||'9999').localeCompare(lastKnownVisit(state,b).lastVisit||'9999')||a.name.localeCompare(b.name,'ru'));
 }
 
+export function contactQueue(state,{branch='',assignee='',day=today()}={}){
+  const rows=new Map();
+  for(const task of queue(state,{branch,assignee,status:'open',day})){
+    if(!rows.has(task.clientId))rows.set(task.clientId,{clientId:task.clientId,assignee:task.assignee,due:task.due,task});
+  }
+  for(const deal of selectDeals(state,{branch,assignee,stage:'open'})){
+    if(deal.stage==='booked')continue;
+    const taskRow=rows.get(deal.clientId);
+    const due=taskRow?.due&&(!deal.due||taskRow.due<deal.due)?taskRow.due:deal.due;
+    rows.set(deal.clientId,{clientId:deal.clientId,assignee:taskRow?.assignee||deal.assignee,due,deal,task:taskRow?.task});
+  }
+  return [...rows.values()].sort((a,b)=>(a.due||'9999').localeCompare(b.due||'9999')||a.clientId.localeCompare(b.clientId));
+}
+
+export function availableForContact(state,branch='',group='focus'){
+  const busy=new Set([
+    ...state.tasks.filter(task=>task.status!=='done').map(task=>task.clientId),
+    ...state.opportunities.filter(isOpen).map(deal=>deal.clientId)
+  ]);
+  return focusClients(state,branch).filter(client=>client.phone&&!busy.has(client.id)
+    &&(group==='focus'||clientSegment(state,client)===group));
+}
+
+function outreachTask(clientId,assignee,due,day,title='Предложить повторный визит'){
+  return {id:newId(),clientId,assignee,due,title,status:'new',created:day,closed:'',
+    result:'',note:'',appointment:'',service:'',planned:null};
+}
+
+function planNextContact(state,client,values,day){
+  const deal=state.opportunities.find(item=>item.clientId===client.id&&isOpen(item));
+  if(values.result==='booked')return;
+  const declined=values.result==='declined';
+  if(deal?.stage==='booked'&&!declined){
+    const exists=state.tasks.some(task=>task.clientId===client.id&&task.assignee===values.assignee
+      &&task.due===values.followUp&&task.status!=='done');
+    if(!exists)state.tasks.push(outreachTask(client.id,values.assignee,values.followUp,day,'Перезвонить по записи'));
+    return;
+  }
+  const stage=declined?'lost':values.result==='contacted'||deal?.stage==='interested'?'interested':'contact';
+  writeDeal(state,{
+    id:deal?.id,clientId:client.id,assignee:values.assignee,stage,due:values.followUp,
+    service:deal?.service||lastKnownVisit(state,client).service,plannedInput:deal?.planned==null?'':deal.planned/100,
+    note:deal?.note||'',reason:values.note.trim()||'Клиент отказался от записи'
+  },{client,assigneeExists:true,day,newId});
+}
+
 export function upgradeState(state){
   if(Array.isArray(state.opportunities))return state;
   const next={...state,version:2,opportunities:[]};
@@ -199,12 +248,41 @@ export function upgradeState(state){
 }
 
 export function applyCommand(state,command){
-  const next=structuredClone(upgradeState(state));
+  let next=structuredClone(upgradeState(state));
   const day=today();
   switch(command.type){
+    case 'record-contact': {
+      const {clientId,taskId,values}=command;
+      const client=byClient(next,clientId);
+      const task=taskId?next.tasks.find(item=>item.id===taskId):null;
+      if(!client||!byPerson(values.assignee)?.branch||!Object.hasOwn(outcomes,values.result))throw new Error('Выберите результат контакта.');
+      if(taskId&&(!task||task.clientId!==clientId||task.status==='done'))throw new Error('Задача уже закрыта. Откройте очередь заново.');
+      const needsDate=values.result!=='booked'&&values.result!=='declined';
+      if(needsDate&&(!validDate(values.followUp)||values.followUp<day))throw new Error('Укажите дату следующего контакта.');
+      const event={assignee:values.assignee,result:values.result,note:values.note??'',service:values.service??'',
+        appointment:values.appointment,visitTime:values.visitTime,plannedInput:values.plannedInput,followUp:values.followUp};
+      next=applyCommand(next,task?{type:'save-task',task:{...task,...event,status:'done'}}:
+        {type:'log-call',clientId,event}).next;
+      planNextContact(next,client,event,day);
+      break;
+    }
+    case 'assign-outreach': {
+      const {branch,assignee,due,group,count}=command;
+      if(!byBranch(branch)||!byPerson(assignee)?.branch||!validDate(due)||due<day||
+        !['focus','lost','attention','unknown'].includes(group)||![10,25,50].includes(count)){
+        throw new Error('Проверьте филиал, ответственного и дату.');
+      }
+      const clients=availableForContact(next,branch,group).slice(0,count);
+      for(const client of clients)next.tasks.push(outreachTask(client.id,assignee,due,day));
+      return {next,value:{assigned:clients.length}};
+    }
     case 'save-deal': {
       const {values}=command;
-      writeDeal(next,values,{client:byClient(next,values.clientId),assigneeExists:Boolean(byPerson(values.assignee)?.branch),day,newId});
+      const active=command.mergeBooking&&!values.id&&values.stage==='booked'
+        ? next.opportunities.find(deal=>deal.clientId===values.clientId&&isOpen(deal)):null;
+      if(active?.stage==='booked')throw new Error('Клиент уже записан. Откройте существующую запись.');
+      writeDeal(next,active?{...values,id:active.id,note:values.note||active.note}:values,
+        {client:byClient(next,values.clientId),assigneeExists:Boolean(byPerson(values.assignee)?.branch),day,newId});
       break;
     }
     case 'save-task': {
@@ -219,6 +297,7 @@ export function applyCommand(state,command){
       const task={id:id||newId(),clientId,title:title.trim(),assignee,due,status,created:old?.created||day,
         closed,result:closed?result:'',note:note.trim(),
         appointment:closed&&result==='booked'?appointment:'',service:closed&&result==='booked'?service.trim():'',
+        visitTime:closed&&result==='booked'?command.task.visitTime||'':'',
         planned:closed&&result==='booked'?(command.task.plannedInput===undefined?old?.planned??null:parseMoney(command.task.plannedInput)):null};
       const reference='task:'+task.id;
       if(old?.result==='booked'&&(task.result!=='booked'||old.clientId!==clientId))releaseBooking(next,reference,old.clientId,day);
@@ -234,6 +313,7 @@ export function applyCommand(state,command){
       if(result==='booked'&&!validDate(appointment)) throw new Error('Укажите дату повторной записи.');
       const event={id:newId(),kind:'call',date:day,result,assignee,note:note.trim(),
         appointment:result==='booked'?appointment:'',service:result==='booked'?service.trim():'',
+        visitTime:result==='booked'?command.event.visitTime||'':'',
         planned:result==='booked'?parseMoney(command.event.plannedInput):null};
       client.history.unshift(event);
       if(result==='booked')syncBooking(next,event,{reference:'call:'+event.id,clientId:client.id,day,newId});
