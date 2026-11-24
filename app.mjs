@@ -7,6 +7,7 @@ import {readFile,previewRows,demoCsv,detectColumns,fieldLabels} from './importer
 import {repository,storageKey,serverMode,demoMode} from './repository.mjs';
 import {money} from './finance.mjs';
 import {moneyAudit,priceLabels} from './money-audit.mjs';
+import {branchMoney,canStartReturn,paymentBuckets,paymentPeriods} from './work-analytics.mjs';
 
 const app=document.querySelector('#app');
 const dialog=document.querySelector('#dialog');
@@ -22,10 +23,11 @@ const pageFromHash=()=>{
   const page=location.hash.slice(1);
   return Object.hasOwn(routes,page)?page:page==='tasks'?'contacts':'home';
 };
+const queueTabs={...contactTabs,priority:'К возврату'};
 const ui={
   page:pageFromHash(),theme:savedPrefs.theme==='dark'?'dark':'light',profile:m.byPerson(savedPrefs.profile)?.id||'manager',
   branch:m.byBranch(savedPrefs.branch)?.id||'',query:'',segment:'',
-  homeFilter:'ready',homeReason:'',homeLimit:8,contactTab:'ready',contactClient:'',contactPinned:false,
+  homeFilter:'ready',homeReason:'',homeLimit:8,moneyView:'reason',payWindow:'',contactReason:'',contactTab:'ready',contactClient:'',contactPinned:false,
   clientSort:'money',period:30,mobileNav:false,importFile:null,importLayout:null,importMapping:null,importPreview:null,importError:'',
   importBusy:false,fallback:m.byBranch(savedPrefs.branch)?.id||'center',clientLimit:12
 };
@@ -99,7 +101,7 @@ async function run(command,{refresh=true}={}){
 }
 function resetNav(){
   Object.assign(ui,{query:'',segment:'',clientSort:'money',clientLimit:12,homeFilter:'ready',homeReason:'',
-    homeLimit:8,contactTab:'ready',contactClient:'',contactPinned:false,mobileNav:false});
+    homeLimit:8,contactReason:'',contactTab:'ready',contactClient:'',contactPinned:false,mobileNav:false});
 }
 function go(page,filters={}){
   if(managerPages.has(page)&&!manager())page='home';
@@ -128,7 +130,7 @@ function shell(contents){
   const taskCount=m.queue(state,{branch:ui.branch,assignee:mine(),status:'open'}).length;
   const themeIcon=ui.theme==='light'?'moon':'sun';
   const themeLabel=ui.theme==='light'?'Включить тёмную тему':'Включить светлую тему';
-  return '<div class="layout"><aside class="sidebar'+(ui.mobileNav?' mobile-open':'')+'"><a href="#home" class="brand" data-action="navigate" data-id="home">'+logo+'<span><strong>GLAMOUR</strong><small>САЛОННАЯ CRM</small></span></a>'+
+  return '<div class="layout"><aside class="sidebar'+(ui.mobileNav?' mobile-open':'')+'"><a href="#home" class="brand" data-action="navigate" data-id="home">'+logo+'<span><strong>GLAMOUR</strong><small>ВОЗВРАТ КЛИЕНТОВ</small></span></a>'+
     '<div class="workspace"><span class="workspace-logo">'+icon('building',18)+'</span><span><strong>Сеть салонов</strong><small>GLAMOUR · Ижевск</small></span></div>'+
     '<nav aria-label="Разделы"><p class="nav-caption">РАБОЧЕЕ ПРОСТРАНСТВО</p>'+navEntry('home')+navEntry('contacts',taskCount)+navEntry('clients')+
     (manager()?'<p class="nav-caption tools-caption">УПРАВЛЕНИЕ</p>'+navEntry('agent')+navEntry('import')+navEntry('settings'):'')+'</nav>'+
@@ -152,7 +154,11 @@ const categoryOptions=keys=>keys.map(key=>[key,reasonTitle(key)]);
 const clientCategories=[...segmentKeys,'future','working','excluded','unknown','clear'];
 const contactDraftFields=['result','followUp','followUpTime','paidAmount','paidDate','note'];
 function scopedContactGroups(){
-  return contactGroups(state,{branch:ui.branch,assignee:mine(),amounts:new Map(auditView().rows.map(row=>[row.client.id,row.amount]))});
+  const {rows}=auditView();
+  const groups=contactGroups(state,{branch:ui.branch,assignee:mine(),amounts:new Map(rows.map(row=>[row.client.id,row.amount]))});
+  groups.priority=rows.filter(row=>canStartReturn(row)&&(!ui.contactReason||row.reason===ui.contactReason))
+    .map(({client})=>({clientId:client.id,assignee:defaultAssignee(client.branch)})).filter(row=>row.assignee);
+  return groups;
 }
 function deskSelection(){
   const groups=scopedContactGroups();
@@ -177,9 +183,9 @@ function deskDraft(row){
 function openContactDesk(id){
   if(!m.byClient(state,id)||contactSaving)return;
   const groups=scopedContactGroups();
-  const tab=groups.ready.some(row=>row.clientId===id)?'ready':
+  const tab=groups.priority.some(row=>row.clientId===id)?'priority':groups.ready.some(row=>row.clientId===id)?'ready':
     groups.followup.some(row=>row.clientId===id)?'followup':'all';
-  go('contacts',{contactTab:tab,contactClient:id,contactPinned:!groups.all.some(row=>row.clientId===id)});
+  go('contacts',{contactTab:tab,contactClient:id,contactPinned:tab==='all'&&!groups.all.some(row=>row.clientId===id)});
 }
 function deskFact(label,value){
   return '<div><dt>'+s(label)+'</dt><dd>'+s(value??'—')+'</dd></div>';
@@ -211,6 +217,23 @@ const quickResults=[
   ['declined','Клиенту не актуально','Укажите причину, если она известна.'],
   ['do_not_contact','Просит больше не звонить','Сохраните результат, чтобы исключить клиента из обзвона.']
 ];
+const callResults=[
+  ['no_answer','phone','Не ответил'],
+  ['callback','clock','Перезвонить'],
+  ['contacted','target','Есть интерес'],
+  ['paid','wallet','Оплатил']
+];
+const nextResultHelp={
+  no_answer:'Выберите дату следующей попытки.',
+  callback:'Укажите согласованные дату и время.',
+  contacted:'Запишите, что заинтересовало клиента, и укажите дату следующего контакта.',
+  thinking:'Укажите, когда договорились вернуться к разговору.',
+  agreed:'Запишите договорённость и дату следующего контакта.',
+  paid:'Укажите сумму и дату фактической оплаты.',
+  declined:'Если известна причина отказа, добавьте её в комментарий.',
+  invalid_number:'Карточка будет исключена из обзвона из-за неверного номера.',
+  do_not_contact:'Карточка будет исключена из обзвона по просьбе клиента.'
+};
 const outcomeChecks={
   contacted:'Если клиент подтвердил интерес к варианту.',
   callback:'Если клиент согласовал день и время звонка.',
@@ -259,16 +282,19 @@ function deskClientCard(row,index,rows){
   const latest=history.find(event=>event.kind==='payment');
   const callable=!excluded&&!(!row.task&&future)&&Boolean(row.assignee&&client.phone);
   const reason=row.task?.originReason||row.task?.reason||m.retentionReason(state,client);
-  const title=row.task?.title||workSteps[reason]||'Связаться с клиентом';
   const owner=m.byPerson(row.assignee)?.name;
   const estimate=auditView().rows.find(entry=>entry.client.id===client.id);
   const status=row.task?.status||'';
   const guide=callable?deskGuide(client,row,last,history):null;
-  const when=row.due?[m.longDate(row.due),row.task?.dueTime].filter(Boolean).join(' · '):'Без срока';
+  const when=row.due?[m.longDate(row.due),row.task?.dueTime].filter(Boolean).join(' · '):
+    ui.contactTab==='priority'?'Без назначенной задачи':'Без срока';
   const canAdvance=index>=0&&rows.length>1;
   const fill=draft;
   const form='<form id="desk-contact-form" data-key="'+s(record.key)+'" data-client="'+s(client.id)+'" data-task="'+s(row.task?.id||'')+'">'+
-    '<div class="desk-form form-grid">'+outcomeFields(fill)+paymentFields(draft)+followUpFields(draft)+
+    '<div class="call-outcomes" aria-label="Частые результаты">'+callResults.map(([result,ic,label])=>
+      button(label,ic,'quick-outcome','pick-outcome','data-id="'+result+'" aria-pressed="'+(draft.result===result)+'"')).join('')+'</div>'+
+    '<div class="desk-form form-grid">'+outcomeFields(fill)+
+    '<p class="desk-result-tip wide" aria-live="polite" hidden></p>'+paymentFields(draft)+followUpFields(draft)+
     '<input type="hidden" name="requestId" value="'+s(draft.requestId)+'">'+
     '<input type="hidden" name="assignee" value="'+s(row.assignee)+'">'+
     field('Комментарий','<textarea name="note" maxlength="1200" rows="3" placeholder="Что обсудили и о чём договорились">'+s(draft.note)+'</textarea>','wide')+
@@ -281,10 +307,11 @@ function deskClientCard(row,index,rows){
     (row.task?.priority==='high'?badge('high',priorities):'')+'</div>'+
     '<div class="desk-phone">'+icon('phone',19)+'<div><small>Телефон клиента</small><strong>'+s(m.formatPhone(client.phone))+'</strong></div>'+
     (client.phone?button('Копировать',null,'secondary small','copy-desk-phone','data-id="'+s(client.id)+'"'):'')+'</div>'+
-    '<div class="desk-audit"><small>Потенциал одной покупки</small><strong>'+s(estimate?.amount!=null?money(estimate.amount):'Нет оценки')+'</strong>'+
+    '<div class="desk-summary"><div class="desk-audit"><small>Потенциал одной покупки</small><strong>'+s(estimate?.amount!=null?money(estimate.amount):'Нет оценки')+'</strong>'+
     (estimate?.basis?'<span>'+s(priceLabels[estimate.basis])+'</span>':'')+'</div>'+
-    '<div class="desk-reason"><div class="desk-kicker">Причина контакта</div><strong>'+s(reasonTitle(reason))+'</strong><p>'+s(workSteps[reason]||title)+'</p>'+
-    '<div class="desk-task-meta">'+icon('clock',16)+s(when)+(owner?'<span>'+s(owner)+'</span>':'')+(status?badge(status):'')+'</div></div>'+
+    '<div class="desk-reason"><div class="desk-kicker">Причина контакта</div><strong>'+s(reasonTitle(reason))+'</strong>'+
+    (row.task?.title?'<p>'+s(row.task.title)+'</p>':'')+'</div></div>'+
+    '<div class="desk-task-meta">'+icon('clock',14)+s(when)+(owner?'<span>'+s(owner)+'</span>':'')+(status?badge(status):'')+'</div>'+
     (row.task?.note?'<p class="desk-task-note">'+s(row.task.note)+'</p>':'')+'</section>'+
     (guide?deskAgentPanel(client,draft,guide):'')+'</div>'+
     '<aside class="desk-column"><section class="panel desk-panel desk-result"><div class="panel-head"><h2>Результат контакта</h2>'+iconBox('checkList','pink')+'</div>'+
@@ -302,12 +329,14 @@ function contactDeskPage(){
   const controlButton=(label,direction,disabled)=>button(label,null,'secondary small','desk-move',
     'data-id="'+direction+'"'+(disabled||contactSaving?' disabled':''));
   return heading('Очередь клиентов','',manager()?button('Назначить задачи','plus','secondary','batch'):'')+
-    '<section class="panel desk-toolbar"><div class="desk-toolbar-tabs">'+tabs(Object.entries(contactTabs).map(([key,label])=>
+    '<section class="panel desk-toolbar"><div class="desk-toolbar-tabs">'+tabs(Object.entries(queueTabs).map(([key,label])=>
       [key,label+' · '+m.number(groups[key].length)]),ui.contactTab,'desk-tab')+'</div><div class="desk-nav">'+
     controlButton('Предыдущий','prev',index<=0)+'<div class="desk-position" aria-live="polite">'+
     (index>=0?'<span><strong>'+m.number(index+1)+'</strong> из '+m.number(rows.length)+'</span><progress aria-label="Позиция в очереди" value="'+(index+1)+'" max="'+rows.length+'"></progress>':
       '<span>'+(row?'Отдельная карточка':'Очередь пуста')+'</span>')+'</div>'+
     controlButton('Следующий','next',index<0||index>=rows.length-1)+'</div></section>'+
+    (ui.contactReason&&ui.contactTab==='priority'?'<div class="desk-filter-context">'+badge(ui.contactReason,reasons)+
+      button('Показать все причины',null,'subtle small','desk-tab','data-id="priority"')+'</div>':'')+
     (row?deskClientCard(row,index,rows):'<section class="panel">'+empty('В этой очереди пока нет клиентов','Выберите другой фильтр или проверьте назначение задач.','phone')+'</section>');
 }
 function agentPage(){
@@ -327,8 +356,9 @@ function agentPage(){
 }
 
 function selectDeskTab(id){
-  if(contactSaving||!Object.hasOwn(contactTabs,id))return;
+  if(contactSaving||!Object.hasOwn(queueTabs,id))return;
   ui.contactTab=id;
+  ui.contactReason='';
   ui.contactPinned=false;
   ui.contactClient='';
   render();
@@ -476,68 +506,123 @@ function auditView(period=ui.period,branch=ui.branch){
   if(!auditCache.has(key))auditCache.set(key,moneyAudit(state,{branch,day,period}));
   return auditCache.get(key);
 }
-const workSteps={
-  cancellation:'Уточнить причину отмены и снять препятствие.',
-  regular:'Выяснить, почему перестал приходить, и предложить решение.',
-  single:'Узнать, как прошёл первый визит, и предложить подходящую услугу.',
-  inactive:'Напомнить о предыдущей услуге и уточнить, актуальна ли она.'
-};
+const clientPlural=new Intl.PluralRules('ru');
+const countClients=count=>m.number(count)+' '+({one:'клиент',few:'клиента',many:'клиентов',other:'клиентов'}[clientPlural.select(count)]);
+function recoveryHero(ready,readyAmount){
+  const title='Деньги в базе';
+  const detail=ready.length?countClients(ready.length)+(ready.length===1?' готов к контакту':' готовы к контакту')+
+    (readyAmount?' · потенциал '+money(readyAmount):''):
+    'Проверьте результаты и текущие задачи по возврату клиентов.';
+  const queueAction=ready.some(row=>defaultAssignee(row.client.branch))?
+    button('Начать с приоритетных','right','hero-primary','start-returns'):
+    button(manager()?'Открыть очередь':'Моя очередь','right','hero-primary','navigate','data-id="contacts"');
+  return '<section class="recovery-hero" aria-labelledby="home-title"><div class="recovery-hero-content">'+
+    '<p class="hero-scope">'+icon('pin',15)+s(ui.branch?m.byBranch(ui.branch)?.label:'Все филиалы')+'</p>'+
+    '<h1 id="home-title">'+title+'</h1><p class="hero-detail">'+s(detail)+'</p>'+
+    '<div class="hero-actions">'+queueAction+
+    (manager()?button('Импортировать базу','upload','hero-secondary','navigate','data-id="import"'):'')+'</div></div></section>';
+}
+const compactRubles=new Intl.NumberFormat('ru-RU',{notation:'compact',maximumFractionDigits:1});
+const intervalLabel=range=>range.from===range.through?m.formatDate(range.from):
+  m.formatDate(range.from)+' — '+m.formatDate(range.through);
+function paymentChart(audit){
+  const buckets=paymentBuckets(audit.recorded,m.today(),ui.period);
+  const maximum=Math.max(...buckets.map(item=>item.amount));
+  const scale=Math.max(1,Math.ceil(maximum/100000))*100000;
+  const selected=buckets.find(item=>item.from===ui.payWindow);
+  const periods='<div class="chart-periods" aria-label="Период оплат">'+paymentPeriods.map(days=>
+    '<button type="button" data-action="pay-period" data-id="'+days+'" aria-pressed="'+(ui.period===days)+'" aria-label="'+days+' дней">'+days+' дн.</button>').join('')+'</div>';
+  const chart='<div class="payment-chart"><div class="chart-axis" aria-hidden="true">'+[scale,scale/2,0].map(value=>
+    '<span>'+s(compactRubles.format(value/100))+' ₽</span>').join('')+'</div>'+
+    '<div class="chart-columns" style="--columns:'+buckets.length+'">'+buckets.map(({from,through,amount,count})=>{
+      const label=intervalLabel({from,through});
+      return '<button type="button" class="chart-column" data-action="pay-window" data-id="'+from+'" aria-pressed="'+(selected?.from===from)+
+        '" aria-label="'+s(label+', '+money(amount)+', оплат: '+m.number(count))+'"><span class="chart-slot" aria-hidden="true">'+
+        '<span class="chart-bar" style="--bar:'+Math.max(amount?2:0,100*amount/scale).toFixed(2)+'%"></span></span>'+
+        '<span class="chart-label" aria-hidden="true">'+s(m.formatDate(through,{day:'numeric',month:'numeric'}))+'</span></button>';
+    }).join('')+'</div></div>';
+  return '<section class="panel revenue-panel"><div class="panel-head"><div><h2>Возвращённая выручка</h2><p>Подтверждённые оплаты</p></div>'+periods+'</div>'+
+    '<div class="chart-summary"><span>'+s(money(selected?.amount??audit.confirmed))+'</span><small>'+s(selected?
+      intervalLabel(selected)+' · оплат: '+m.number(selected.count):'Оплат за период: '+m.number(audit.recorded.length))+'</small></div>'+
+    (audit.recorded.length?chart:'<div class="chart-empty">'+icon('chart',25)+'<span>За этот период оплат пока нет</span></div>')+
+    '<div class="chart-footer">'+(selected?button('Весь период',null,'subtle small','pay-window'):
+      '<span class="chart-legend"><i></i>Фактические суммы</span>')+
+    button(selected?'Оплаты за эти даты':'Журнал оплат','right','subtle small','payment-log',selected?'data-id="'+selected.from+'"':'')+'</div></section>';
+}
+function moneyBreakdown(audit){
+  const byCause=ui.moneyView==='reason';
+  const peak=Math.max(1,...audit.groups.map(item=>item.amount));
+  const branchFilter=ui.branch;
+  const branches=m.branches.filter(branch=>!branchFilter||branch.id===branchFilter);
+  const controls=tabs([['reason','Причины'],['branch','Филиалы']],ui.moneyView,'money-view');
+  let content;
+  if(byCause){
+    content=audit.groups.length?'<div class="money-group-list">'+audit.groups.map(group=>
+      '<button type="button" class="money-group" data-action="money-reason" data-id="'+s(group.reason)+'" aria-pressed="'+(ui.homeReason===group.reason)+'">'+
+      '<span class="money-group-label"><strong>'+s(reasonTitle(group.reason))+'</strong><small>'+countClients(group.count)+
+      (group.priced<group.count?' · с оценкой: '+m.number(group.priced):'')+'</small></span><strong>'+s(group.priced?money(group.amount):'—')+'</strong>'+
+      '<span class="money-track" aria-hidden="true"><span style="width:'+(group.amount/peak*100).toFixed(2)+'%"></span></span></button>').join('')+
+      '</div>':empty('Нет клиентов на возврат',audit.total?'Проверьте данные о последних визитах.':'Загрузите клиентскую базу.','users');
+  }else{
+    const totals=branchMoney(audit,branches,new Map(state.clients.map(client=>[client.id,client.branch])));
+    content='<div class="money-branch-list"><div class="money-branch-head" aria-hidden="true"><span>Филиал</span><span>Потенциал</span><span>Оплачено</span></div>'+
+      totals.map(group=>'<button class="money-branch-row" type="button" data-action="money-branch" data-id="'+s(group.branch.id)+'"'+
+        ' aria-label="'+s(group.branch.name+', потенциал '+(group.priced?money(group.amount):'без оценки')+', подтверждено '+money(group.confirmed))+'">'+
+        '<span><strong>'+s(group.branch.name)+'</strong><small>'+countClients(group.count)+'</small></span>'+
+        '<b>'+s(group.priced?money(group.amount):'—')+'</b><b class="branch-confirmed">'+s(money(group.confirmed))+'</b></button>').join('')+'</div>';
+  }
+  return '<section class="panel money-segments"><div class="panel-head"><div><h2>Где можно вернуть деньги</h2><p>Оценка одной покупки на клиента</p></div>'+
+    '</div><div class="breakdown-toolbar">'+controls+(branchFilter&&!byCause?button('Все филиалы',null,'subtle small','money-branch'):'')+'</div>'+
+    content+'<div class="breakdown-footer"><span>Без суммы <b>'+m.number(audit.unknown)+'</b></span><span>Без даты визита <b>'+m.number(audit.unclassified)+
+    '</b></span>'+(audit.estimated?'<span title="Медиана чеков по той же услуге и филиалу">По похожим клиентам <b>'+m.number(audit.estimated)+'</b></span>':'')+'</div></section>';
+}
 function home(){
   const audit=auditView();
   const priced=audit.rows.length-audit.unknown;
+  const ready=audit.rows.filter(canStartReturn);
+  const readyAmount=ready.reduce((sum,row)=>sum+(row.amount??0),0);
   const inProgress=audit.rows.filter(row=>row.working);
   const workingAmount=inProgress.reduce((sum,row)=>sum+(row.amount??0),0);
   const workingPriced=inProgress.some(row=>row.amount!==null);
   const list=audit.rows.filter(row=>(!ui.homeReason||row.reason===ui.homeReason)&&
-    (ui.homeFilter==='all'||(ui.homeFilter==='working'?row.working:!row.working&&row.contactable&&!row.paused)));
-  const filtered=ui.homeReason?reasonTitle(ui.homeReason):'Кому уделить внимание';
+    (ui.homeFilter==='all'||(ui.homeFilter==='working'?row.working:canStartReturn(row))));
+  const filtered=ui.homeReason?reasonTitle(ui.homeReason):'Приоритетные клиенты';
   const currentAi=aiReport?.state===state&&aiReport.branch===ui.branch?aiReport:null;
-  const actions=manager()?button('Импортировать базу','upload','secondary','navigate','data-id="import"')+
-    button('Открыть очередь','right','primary','navigate','data-id="contacts"'):
-    button('Моя очередь','right','primary','navigate','data-id="contacts"');
-  return heading('Деньги в базе','',actions)+
-    '<div class="money-kpis">'+
-    stat('Потенциал возврата',priced?money(audit.open):'—',m.number(priced)+' из '+m.number(audit.rows.length)+' клиентов с оценкой','wallet','berry')+
-    stat('Уже в работе',workingPriced?money(workingAmount):'—',m.number(inProgress.length)+' клиентов из общего потенциала','phone','pink','money-working')+
-    stat('Подтверждённые оплаты',money(audit.confirmed),m.number(audit.recorded.length)+' оплат за '+ui.period+' дн.','check','mint','payment-log')+
-    '</div><div class="money-panels"><section class="panel money-segments"><div class="panel-head"><div><h2>Где можно вернуть деньги</h2><p>Оценка одной покупки на клиента</p></div></div>'+
-    (audit.groups.length?'<div class="money-group-list">'+audit.groups.map(group=>{
-      const selected=ui.homeReason===group.reason;
-      const width=audit.open?group.amount/Math.max(...audit.groups.map(item=>item.amount))*100:0;
-      return '<button type="button" class="money-group" data-action="money-reason" data-id="'+s(group.reason)+'" aria-pressed="'+selected+'">'+
-        '<span class="money-group-label"><strong>'+s(reasonTitle(group.reason))+'</strong><small>'+m.number(group.count)+' в сегменте'+
-        (group.priced<group.count?' · '+m.number(group.priced)+' с оценкой':'')+'</small></span><strong>'+s(group.priced?money(group.amount):'—')+'</strong>'+
-        '<span class="money-track" aria-hidden="true"><span style="width:'+width.toFixed(2)+'%"></span></span></button>';
-    }).join('')+'</div>':empty('Нет клиентов на возврат',audit.total?'Проверьте данные о последних визитах.':'Загрузите клиентскую базу.','users'))+'</section>'+
-    '<section class="panel money-guide"><div class="panel-head"><div><h2>Следующее действие</h2><p>По текущему фильтру филиалов</p></div>'+iconBox('sparkle','berry')+'</div>'+
-    '<div class="money-guide-content">'+(audit.groups.length?'<strong>'+s(reasonTitle(audit.groups[0].reason))+'</strong><p>'+s(workSteps[audit.groups[0].reason])+'</p>':
-      '<strong>'+s(audit.total?'Проверить полноту выгрузки':'Загрузить клиентскую базу')+'</strong>')+
-    '<div class="money-guide-detail"><span>Без суммы в списке возврата</span><b>'+m.number(audit.unknown)+'</b></div>'+
-    '<div class="money-guide-detail"><span>Без даты визита в базе</span><b>'+m.number(audit.unclassified)+'</b></div>'+
-    '<div class="money-guide-detail"><span>Оценка по похожим клиентам</span><b>'+m.number(audit.estimated)+'</b></div>'+
-    (manager()&&aiAvailable?'<div class="money-ai">'+button(currentAi?.text?'Обновить рекомендации ИИ':'Получить рекомендации ИИ','sparkle','secondary small','money-ai',currentAi?.pending?'disabled':'')+
-      (currentAi?.pending?'<p role="status">ИИ анализирует результаты…</p>':currentAi?.text?'<p class="money-ai-text">'+s(currentAi.text)+'</p>':
-        currentAi?.error?'<p role="alert">'+s(currentAi.error)+'</p>':'')+'</div>':'')+'</div></section></div>'+
-    '<section class="panel money-clients" id="money-clients"><div class="panel-head"><div><h2>'+s(filtered)+'</h2><p>Сначала клиенты с наибольшим потенциалом</p></div>'+
-    (ui.homeReason?button('Все сегменты',null,'secondary small','money-reason','data-id="'+s(ui.homeReason)+'"'):'')+'</div>'+
-    '<div class="toolbar">'+tabs([['ready','Можно связаться'],['working','В работе'],['all','Весь список']],ui.homeFilter,'home-filter')+'</div>'+
+  return recoveryHero(ready,readyAmount)+'<div class="money-kpis">'+
+    stat('Потенциал возврата',priced?money(audit.open):'—',m.number(priced)+' из '+m.number(audit.rows.length)+' с известной оценкой','wallet','berry','money-all')+
+    stat('Уже в работе',workingPriced?money(workingAmount):'—',countClients(inProgress.length)+' из общего потенциала','phone','pink','money-working')+
+    stat('Подтверждённые оплаты',money(audit.confirmed),'Оплат: '+m.number(audit.recorded.length)+' · за '+ui.period+' дн.','check','mint','payment-log')+
+    '</div><div class="money-panels">'+paymentChart(audit)+moneyBreakdown(audit)+'</div>'+
+    '<section class="panel money-clients" id="money-clients"><div class="panel-head"><div><h2 tabindex="-1">'+s(filtered)+'</h2><p>Сначала клиенты с наибольшим потенциалом</p></div>'+
+    '<div class="client-hero-actions">'+(ui.homeReason?button('Все сегменты',null,'secondary small','money-reason','data-id="'+s(ui.homeReason)+'"'):'')+
+    (ui.homeReason&&ready.some(row=>defaultAssignee(row.client.branch)&&row.reason===ui.homeReason)?
+      button('Начать с этого сегмента','right','primary small','start-returns','data-id="'+s(ui.homeReason)+'"'):'')+'</div></div>'+
+    '<div class="toolbar">'+tabs([['ready','Можно связаться · '+m.number(ready.length)],['working','В работе · '+m.number(inProgress.length)],
+      ['all','Весь список · '+m.number(audit.rows.length)]],ui.homeFilter,'home-filter')+'</div>'+
     (list.length?'<div class="table-wrap"><table><thead><tr><th>Клиент</th><th>Причина</th><th>Потенциал</th><th aria-label="Действия"></th></tr></thead><tbody>'+
     list.slice(0,ui.homeLimit).map(({client,reason,amount,basis,working,contactable,paused})=>
       '<tr><td><button class="identity" type="button" data-action="desk-client" data-id="'+s(client.id)+'">'+clientAvatar(client)+'<span><strong>'+s(client.name)+'</strong><small>'+
       s(m.byBranch(client.branch)?.name||'')+'</small></span></button></td><td>'+badge(reason,reasons)+
       (working?'<small class="cell-note">В работе</small>':!contactable?'<small class="cell-note">Нет телефона для контакта</small>':paused?'<small class="cell-note">Недавно связывались</small>':'')+'</td><td><strong class="nowrap">'+
       s(amount===null?'Нет оценки':money(amount))+'</strong>'+(basis?'<small class="cell-note">'+s(priceLabels[basis])+'</small>':'')+
-      '</td><td class="row-end">'+button('Открыть','right','secondary small','desk-client','data-id="'+s(client.id)+'"')+'</td></tr>').join('')+
+      '</td><td class="row-end">'+button('Открыть','right','secondary small','desk-client','data-id="'+s(client.id)+'" aria-label="'+s('Открыть карточку клиента '+client.name)+'"')+'</td></tr>').join('')+
     '</tbody></table></div>':empty('Нет клиентов по этому фильтру','','users'))+
-    footerCount(list.length,ui.homeLimit,'more-contacts')+'</section>';
+    footerCount(list.length,ui.homeLimit,'more-contacts')+'</section>'+
+    (manager()&&aiAvailable?'<section class="panel money-ai-panel"><div class="panel-head"><h2>Рекомендации ИИ</h2>'+
+      button(currentAi?.text?'Обновить':'Получить рекомендации','sparkle','secondary small','money-ai',currentAi?.pending?'disabled':'')+'</div>'+
+      (currentAi?.pending?'<p role="status">ИИ анализирует результаты…</p>':currentAi?.text?'<p class="money-ai-text">'+s(currentAi.text)+'</p>':
+        currentAi?.error?'<p role="alert">'+s(currentAi.error)+'</p>':'')+'</section>':'');
 }
-function paymentLog(){
+function paymentLog(from=''){
   const audit=auditView();
-  present(modalHead('Подтверждённые оплаты')+'<div class="drawer-body">'+
-    filterSelect('period','Период',[['7','Последние 7 дней'],['30','Последние 30 дней'],['90','Последние 90 дней']],String(ui.period))+
-    '<div class="money-paid-total"><strong>'+s(money(audit.confirmed))+'</strong><small>'+m.number(audit.recorded.length)+' оплат</small></div>'+
-    (audit.recorded.length?'<div class="table-wrap"><table><thead><tr><th>Клиент</th><th>Дата</th><th>Сумма</th><th>Ответственный</th></tr></thead><tbody>'+
-      audit.recorded.map(entry=>'<tr><td><button type="button" class="task-title" data-action="client" data-id="'+s(entry.clientId)+'">'+s(m.byClient(state,entry.clientId)?.name)+'</button></td><td class="nowrap">'+
+  const range=paymentBuckets(audit.recorded,m.today(),ui.period).find(bucket=>bucket.from===from);
+  const payments=range?audit.recorded.filter(entry=>entry.date>=range.from&&entry.date<=range.through):audit.recorded;
+  present(modalHead('Подтверждённые оплаты',range?intervalLabel(range):'')+'<div class="drawer-body">'+
+    filterSelect('period','Период',paymentPeriods.map(days=>[String(days),'Последние '+days+' дней']),String(ui.period))+
+    (range?button('Показать весь период',null,'subtle small','payment-log'):'')+
+    '<div class="money-paid-total"><strong>'+s(money(range?.amount??audit.confirmed))+'</strong><small>Оплат: '+m.number(payments.length)+'</small></div>'+
+    (payments.length?'<div class="table-wrap"><table><thead><tr><th>Клиент</th><th>Дата</th><th>Сумма</th><th>Ответственный</th></tr></thead><tbody>'+
+      payments.map(entry=>'<tr><td><button type="button" class="task-title" data-action="client" data-id="'+s(entry.clientId)+'">'+s(m.byClient(state,entry.clientId)?.name)+'</button></td><td class="nowrap">'+
         s(m.formatDate(entry.date))+'</td><td class="nowrap">'+s(money(entry.amount))+'</td><td>'+s(m.byPerson(entry.assignee)?.name)+'</td></tr>').join('')+
       '</tbody></table></div>':empty('Подтверждённых оплат за период нет','','wallet'))+'</div>','payments');
 }
@@ -550,6 +635,12 @@ async function analyzeMoney(){
   catch(error){current.error=error.message;}
   current.pending=false;
   if(ui.page==='home'&&aiReport===current)render();
+}
+
+function restoreSelection(action,id){
+  const element=[...document.querySelectorAll('[data-action="'+action+'"]')].find(button=>button.dataset.id===id);
+  element?.focus();
+  return element;
 }
 
 function searchInput(placeholder){
@@ -854,6 +945,12 @@ function toggleOutcome(form=dialog.querySelector('form')){
   const status=form.elements.namedItem('status');
   const result=form.elements.namedItem('result');
   const selected=!status||status.value==='done';
+  const tip=form.querySelector('.desk-result-tip');
+  if(tip){
+    for(const shortcut of form.querySelectorAll('.quick-outcome'))shortcut.setAttribute('aria-pressed',String(shortcut.dataset.id===result.value));
+    tip.textContent=nextResultHelp[result.value]??'';
+    tip.hidden=!tip.textContent;
+  }
   const payment=form.querySelector('[data-payment]');
   form.querySelector('.result-fields').hidden=!selected;
   result.disabled=!selected;
@@ -917,18 +1014,39 @@ function downloadSample(){
 document.addEventListener('click',event=>{
   const element=event.target.closest('[data-action]');
   if(!element||element.disabled)return;
+  const {action}=element.dataset;
   const id=element.dataset.id||'';
   if(element.tagName==='A'&&(event.ctrlKey||event.metaKey||event.shiftKey||event.altKey))return;
   event.preventDefault();
-  switch(element.dataset.action){
+  switch(action){
     case 'navigate': go(id);break;
     case 'nav-toggle': ui.mobileNav=!ui.mobileNav;render();break;
     case 'theme': ui.theme=ui.theme==='light'?'dark':'light';savePrefs();applyTheme();render();document.querySelector('[data-action="theme"]')?.focus();break;
     case 'segment': go('clients',{segment:id});break;
     case 'more-clients': ui.clientLimit+=12;render();break;
-    case 'money-working': ui.homeFilter='working';ui.homeReason='';render();document.getElementById('money-clients').scrollIntoView?.();break;
-    case 'money-reason': ui.homeReason=ui.homeReason===id?'':id;ui.homeFilter='all';ui.homeLimit=8;render();break;
-    case 'payment-log': paymentLog();break;
+    case 'money-all':
+    case 'money-working':
+      ui.homeFilter=action==='money-all'?'all':'working';ui.homeReason='';ui.homeLimit=8;
+      render();document.querySelector('#money-clients h2').focus();break;
+    case 'money-reason':
+      ui.homeReason=ui.homeReason===id?'':id;ui.homeFilter='all';ui.homeLimit=8;render();
+      document.querySelector('#money-clients h2').focus();break;
+    case 'money-view':
+      if(id==='reason'||id==='branch'){ui.moneyView=id;render();restoreSelection(action,id);}
+      break;
+    case 'money-branch':
+      if(!id||m.byBranch(id)){ui.branch=ui.branch===id?'':id;ui.homeReason='';ui.homeLimit=8;ui.payWindow='';savePrefs();render();document.getElementById('branch-select').focus();}
+      break;
+    case 'pay-period':
+      if(paymentPeriods.includes(Number(id))){ui.period=Number(id);ui.payWindow='';render();restoreSelection(action,id);}
+      break;
+    case 'pay-window': {
+      const previous=ui.payWindow;
+      ui.payWindow=previous===id?'':id;render();
+      restoreSelection(action,id||previous);break;
+    }
+    case 'start-returns': go('contacts',{contactTab:'priority',contactReason:id});break;
+    case 'payment-log': paymentLog(id);break;
     case 'money-ai': void analyzeMoney();break;
     case 'confirm-payment': confirmPayment(id);break;
     case 'profile': profileModal();break;
@@ -945,6 +1063,7 @@ document.addEventListener('click',event=>{
     case 'desk-move': moveDesk(id);break;
     case 'copy-desk-phone': void copyDeskPhone(id);break;
     case 'agent-step': applyAgentStep(id,element.hasAttribute('data-copy-objection'));break;
+    case 'pick-outcome': applyAgentStep(id,false);break;
     case 'agent-use-example': useAgentExample();break;
     case 'agent-rate': void rateAgent(element);break;
     case 'run-agent': void runAgentNow(element);break;
@@ -997,7 +1116,7 @@ document.addEventListener('change',event=>{
       batchPreview();
     }
     if(field.name==='status'||field.name==='result')toggleOutcome();
-    if(field.dataset.filter==='period'&&modal.type==='payments'){ui.period=Number(field.value);render();paymentLog();return;}
+    if(field.dataset.filter==='period'&&modal.type==='payments'){ui.period=Number(field.value);ui.payWindow='';render();paymentLog();document.querySelector('#filter-period')?.focus();return;}
     if(field.name==='clientId'&&field.form?.id==='task-form'&&manager()){
       const client=m.byClient(state,field.value);
       const assignee=field.form.elements.assignee;
@@ -1010,7 +1129,7 @@ document.addEventListener('change',event=>{
   ui[filter]=filter==='period'?Number(field.value):field.value;
   ui.clientLimit=12;
   if(filter==='fallback')updatePreview();
-  if(filter==='branch')savePrefs();
+  if(filter==='branch'){ui.homeReason='';ui.payWindow='';ui.homeLimit=8;savePrefs();}
   render(true);
 });
 document.addEventListener('dragover',event=>{
