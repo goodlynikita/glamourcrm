@@ -1,10 +1,11 @@
 import {contactQueue,today} from './model.mjs';
 
 export const contactTabs={ready:'К контакту',followup:'Повторные контакты',all:'Все задачи'};
-export function contactGroups(state,{branch='',assignee='',day=today()}={}){
-  const all=contactQueue(state,{branch,assignee,day});
+export function contactGroups(state,{branch='',assignee='',day=today(),amounts=new Map()}={}){
+  const all=contactQueue(state,{branch,assignee,day}).sort((a,b)=>
+    (a.due||'9999').localeCompare(b.due||'9999')||(amounts.get(b.clientId)??0)-(amounts.get(a.clientId)??0));
   return {
-    ready:all.filter(row=>row.due&&row.due<=day),
+    ready:all.filter(row=>row.task?.reason==='followup'?row.due&&row.due<=day:Boolean(row.task)||Boolean(row.due&&row.due<=day)),
     followup:all.filter(row=>row.task?.reason==='followup'),
     all
   };

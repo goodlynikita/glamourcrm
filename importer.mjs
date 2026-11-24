@@ -1,5 +1,7 @@
 import {branches,phoneKey,today,shiftDate} from './model.mjs';
 
+import {parseMoney} from './finance.mjs';
+import {priceFields} from './money-audit.mjs';
 import {cleanImport,createImportIndex,importChanges} from './retention.mjs';
 
 const aliases = {
@@ -11,6 +13,9 @@ const aliases = {
   service:['услуга','последняя услуга','service','last service'],
   externalId:['id','id клиента','идентификатор','внешний id','external id','externalid','client id','код клиента'],
   visitCount:['число визитов','количество визитов','визитов','visit count','visits'],
+  meanCheck:['средний чек','средний чек руб','average check','average spend'],
+  lifetimePaid:['всего оплачено','сумма оплат','сумма покупок','оплачено всего','total paid','lifetime spending'],
+  lastPaid:['последняя оплата','сумма последней оплаты','последний чек','last payment','last spend'],
   nextBooking:['следующая запись','дата следующей записи','будущая запись','next booking','next appointment'],
   lastCancellation:['последняя отмена','дата отмены','дата последней отмены','last cancellation'],
   cancelCount:['количество отмен','число отмен','отмен','cancellation count'],
@@ -21,16 +26,17 @@ const aliasesIndex=new Map(Object.entries(aliases).flatMap(([key,titles])=>title
 export const fieldLabels={
   name:'Имя клиента',phone:'Телефон',branch:'Филиал',externalId:'ID клиента',lastVisit:'Последний визит',
   registered:'Дата регистрации',service:'Последняя услуга',visitCount:'Количество визитов',
+  meanCheck:'Средний чек',lifetimePaid:'Всего оплачено',lastPaid:'Последняя оплата',
   nextBooking:'Следующая запись',lastCancellation:'Последняя отмена',cancelCount:'Количество отмен',cancellations:'История отмен'
 };
-const headers=['Имя клиента','Телефон','Филиал','ID клиента','Последний визит','Количество визитов','Следующая запись','Последняя отмена','Последняя услуга'];
+const headers=['Имя клиента','Телефон','Филиал','ID клиента','Последний визит','Количество визитов','Следующая запись','Последняя отмена','Последняя услуга','Средний чек'];
 export function demoCsv(directory=branches,day=today()){
   const at=index=>directory[index%directory.length].name;
   const rows=[
-    ['Милана Снежина','+7 (000) 000-04-01',at(0),'demo-401',shiftDate(day,-95),1,'','','Маникюр'],
-    ['Эльвира Ясенева','+7 (000) 000-04-02',at(1),'demo-402',shiftDate(day,-84),5,'','','Педикюр'],
-    ['Таисия Ветрова','+7 (000) 000-04-03',at(2),'demo-403','',0,'',shiftDate(day,-6),''],
-    ['Лидия Солнечная','+7 (000) 000-04-04',at(1),'demo-404',shiftDate(day,-103),4,shiftDate(day,5),'','Маникюр']
+    ['Милана Снежина','+7 (000) 000-04-01',at(0),'demo-401',shiftDate(day,-95),1,'','','Маникюр',2400],
+    ['Эльвира Ясенева','+7 (000) 000-04-02',at(1),'demo-402',shiftDate(day,-84),5,'','','Педикюр',3100],
+    ['Таисия Ветрова','+7 (000) 000-04-03',at(2),'demo-403','',0,'',shiftDate(day,-6),'',''],
+    ['Лидия Солнечная','+7 (000) 000-04-04',at(1),'demo-404',shiftDate(day,-103),4,shiftDate(day,5),'','Маникюр',2700]
   ];
   const escape=value=>'"'+String(value).replaceAll('"','""')+'"';
   return '\uFEFF'+[headers,...rows].map(row=>row.map(escape).join(';')).join('\r\n')+'\r\n';
@@ -184,6 +190,12 @@ export function previewRows(rows,existing,fallback,options={}){
         const raw=str(key);
         if(raw&&!/^\d+$/.test(raw))throw Error('Проверьте поле «'+fieldLabels[key]+'».');
         item[key]=raw?Number(raw):null;
+      }
+      for(const key of priceFields){
+        if(has(key)&&str(key)){
+          try{item[key]=parseMoney(str(key).replace(/\s*(?:₽|руб\.?|RUB)$/iu,''));}
+          catch{throw Error('Проверьте сумму в поле «'+fieldLabels[key]+'».');}
+        }
       }
       if(has('cancellations')){
         item.cancellations=str('cancellations').split(/[|;,\n]+/).map(piece=>piece.trim()).filter(Boolean)

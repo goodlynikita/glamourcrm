@@ -25,7 +25,7 @@ export const rulesFields={
   highDays:['Высокий приоритет после, дней отсутствия',90,1,730]
 };
 export const defaultRules=Object.fromEntries(Object.entries(rulesFields).map(([key,[,value]])=>[key,value]));
-export const terminalResults=new Set(['booked','declined','invalid_number','do_not_contact']);
+export const terminalResults=new Set(['booked','paid','declined','invalid_number','do_not_contact']);
 export const blockedResults=new Set(['invalid_number','do_not_contact']);
 export const isDemoPhone=phone=>!phone||/^7000\d{7}$/.test(phone);
 const elapsed=(day,date)=>Math.round((Date.parse(day)-Date.parse(date))/86400000);
@@ -84,7 +84,7 @@ export function createImportIndex(existing){
     remove:row=>update(row,false)
   };
 }
-export const importFields=['name','phone','branch','externalId','lastVisit','registered','service','visitCount','nextBooking','lastCancellation','cancelCount','cancellations'];
+export const importFields=['name','phone','branch','externalId','lastVisit','registered','service','visitCount','nextBooking','lastCancellation','cancelCount','cancellations','meanCheck','lifetimePaid','lastPaid'];
 export function cleanImport(item,branches,day,{demoOnly=false}={}){
   if(!item||typeof item!=='object')throw Error('Неверная строка.');
   const text=(key,limit)=>{
@@ -108,6 +108,12 @@ export function cleanImport(item,branches,day,{demoOnly=false}={}){
     if(!Object.hasOwn(item,key))continue;
     const value=item[key];
     if(value!==null&&(!Number.isSafeInteger(value)||value<0||value>100000))throw Error('Проверьте количество.');
+    record[key]=value;
+  }
+  for(const key of ['meanCheck','lifetimePaid','lastPaid']){
+    if(!Object.hasOwn(item,key))continue;
+    const value=item[key];
+    if(value!==null&&(!Number.isSafeInteger(value)||value<0||value>9999999999))throw Error('Проверьте денежную сумму.');
     record[key]=value;
   }
   if(Object.hasOwn(item,'cancellations')){

@@ -558,3 +558,32 @@ dialog.drawer{inset:0 0 0 auto;margin:0;height:100dvh;max-height:none;width:min(
   .desk-nav{padding-inline:9px;gap:5px;grid-template-columns:1fr minmax(60px,90px) 1fr}
   .desk-save button{white-space:normal}
 }
+
+.money-kpis,.money-panels{display:grid;gap:16px;margin-bottom:18px}
+.money-kpis{grid-template-columns:repeat(3,minmax(0,1fr))}
+.money-kpis>.stat-card{min-height:128px}
+.money-kpis>.stat-card:first-child{background:linear-gradient(125deg,var(--berry-bg),var(--surface) 75%);border-color:var(--berry-bg)}
+.money-kpis .stat-card>strong,.money-paid-total strong,.desk-audit strong{font-variant-numeric:tabular-nums}
+.money-panels{grid-template-columns:minmax(0,1.22fr) minmax(0,1fr)}
+.money-group-list{padding:0 17px 14px}
+.money-group{width:100%;display:grid;grid-template-columns:minmax(0,1fr) auto;gap:7px 12px;padding:9px 9px 10px;align-items:center;border:0;border-radius:8px;background:transparent;color:var(--text);text-align:left;cursor:pointer}
+.money-group:hover,.money-group[aria-pressed=true]{background:var(--surface-muted)}
+.money-group-label{display:grid;gap:2px}
+.money-group-label small,.money-paid-total small{color:var(--muted);font-size:.78rem}
+.money-track{height:4px;grid-column:1/-1;border-radius:999px;background:var(--berry-bg);overflow:hidden}
+.money-track span{height:100%;display:block;background:var(--primary);border-radius:inherit}
+.money-guide-content{padding:0 19px 17px}
+.money-guide-content>p{margin:4px 0 14px;color:var(--muted);line-height:1.45}
+.money-guide-detail{display:flex;justify-content:space-between;gap:10px;border-top:1px solid var(--line-subtle);padding:8px 0;font-size:.85rem;color:var(--muted)}
+.money-guide-detail b{color:var(--text);font-variant-numeric:tabular-nums}
+.money-ai{padding-top:8px}
+.money-ai p{margin:8px 0 0}
+.money-ai-text{white-space:pre-wrap;font-size:.86rem;line-height:1.45}
+.money-clients .toolbar{padding-top:0}
+.money-paid-total{display:grid;gap:1px;margin:16px 0}
+.money-paid-total strong{font-size:2rem}
+.desk-audit{display:grid;gap:2px;padding:10px 13px;margin:0 17px 12px;border-radius:10px;background:var(--berry-bg);color:var(--berry-fg)}
+.desk-audit strong{font-size:1.45rem}
+.desk-audit span,.desk-audit small{font-size:.78rem}
+@media(max-width:900px){.money-panels{grid-template-columns:minmax(0,1fr)}}
+@media(max-width:620px){.money-kpis{grid-template-columns:minmax(0,1fr);gap:8px}.money-kpis>.stat-card{min-height:0}}

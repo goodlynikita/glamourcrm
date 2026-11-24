@@ -46,5 +46,5 @@ async function api(path,values){
 }
 export const repository=serverMode?{
   read:()=>api('state'),dispatch:command=>api('commands',command),session:()=>api('session'),
-  login:values=>api('login',values),logout:()=>api('logout',{})
+  analyze:values=>api('analysis',values),login:values=>api('login',values),logout:()=>api('logout',{})
 }:new BrowserRepository();

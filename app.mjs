@@ -5,7 +5,8 @@ import {icon} from './icons.mjs';
 import * as m from './model.mjs';
 import {readFile,previewRows,demoCsv,detectColumns,fieldLabels} from './importer.mjs';
 import {repository,storageKey,serverMode,demoMode} from './repository.mjs';
-import {actionDate,financeReport,isOpen,money,moneyInput,nextStep,selectDeals,stages} from './finance.mjs';
+import {money} from './finance.mjs';
+import {moneyAudit,priceLabels} from './money-audit.mjs';
 
 const app=document.querySelector('#app');
 const dialog=document.querySelector('#dialog');
@@ -14,25 +15,27 @@ const preferencesKey='glamour-crm-preferences';
 let savedPrefs={};
 try {savedPrefs=JSON.parse(localStorage.getItem(preferencesKey)||'{}');} catch {}
 const routes={
-  home:['Рабочий стол','grid'],contacts:['Работа с клиентами','phone'],clients:['Клиенты','users'],tasks:['Задачи','checkList'],
-  pipeline:['Воронка','funnel'],visits:['Записи','calendar'],branches:['Филиалы','building'],analytics:['Панель руководителя','chart'],import:['Импорт данных','upload'],settings:['Настройки','checkList'],agent:['Агент','sparkle']
+  home:['Деньги в базе','wallet'],contacts:['Очередь','phone'],clients:['Клиенты','users'],
+  agent:['Агент','sparkle'],import:['Импорт','upload'],settings:['Настройки','checkList']
 };
-const pageFromHash=()=>Object.hasOwn(routes,location.hash.slice(1))?location.hash.slice(1):'home';
+const pageFromHash=()=>{
+  const page=location.hash.slice(1);
+  return Object.hasOwn(routes,page)?page:page==='tasks'?'contacts':'home';
+};
 const ui={
   page:pageFromHash(),theme:savedPrefs.theme==='dark'?'dark':'light',profile:m.byPerson(savedPrefs.profile)?.id||'manager',
-  branch:m.byBranch(savedPrefs.branch)?.id||'',query:'',segment:'',taskStatus:'open',taskWhen:'',taskPriority:'',owner:'mine',
-  homeFilter:'ready',homeReason:'',homeLimit:8,contactTab:'ready',contactClient:'',contactPinned:false,visitWeek:0,visitDay:'',pipelineView:savedPrefs.pipelineView==='list'?'list':'board',
-  clientSort:'attention',period:30,reportReason:'',stage:'open',dealWindow:'',dealLimit:12,mobileNav:false,importFile:null,importLayout:null,importMapping:null,importPreview:null,importError:'',
-  importBusy:false,fallback:m.byBranch(savedPrefs.branch)?.id||'center',clientLimit:12,taskLimit:15
+  branch:m.byBranch(savedPrefs.branch)?.id||'',query:'',segment:'',
+  homeFilter:'ready',homeReason:'',homeLimit:8,contactTab:'ready',contactClient:'',contactPinned:false,
+  clientSort:'money',period:30,mobileNav:false,importFile:null,importLayout:null,importMapping:null,importPreview:null,importError:'',
+  importBusy:false,fallback:m.byBranch(savedPrefs.branch)?.id||'center',clientLimit:12
 };
-let state, rawState, account, modal, toastTimer,contactSaving=false;
+let state, rawState, account, modal, toastTimer,contactSaving=false,aiAvailable=false,aiReport,auditCache=new Map();
 const contactDrafts=new Map();
 const s=value=>String(value??'').replace(/[&<>"']/g,ch=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'})[ch]);
 const attr=(name,value)=>' '+name+'="'+s(value)+'"';
-const cap=text=>text.charAt(0).toUpperCase()+text.slice(1);
 const person=()=>serverMode?account:m.byPerson(ui.profile,rawState);
 const manager=()=>!person()?.branch;
-const managerPages=new Set(['analytics','import','settings','agent']);
+const managerPages=new Set(['import','settings','agent']);
 const assignees=()=>m.people.filter(p=>p.branch&&(manager()||p.id===ui.profile));
 const defaultAssignee=branch=>assignees().find(p=>m.assignedBranches(p).includes(branch))?.id;
 const mine=()=>manager()?'':ui.profile;
@@ -52,7 +55,7 @@ const empty=(title,text,ic='folder')=>'<div class="empty">'+iconBox(ic,'berry')+
 const typeIcon={visit:'calendar',call:'phone',payment:'wallet'};
 
 function savePrefs(){
-  try {localStorage.setItem(preferencesKey,JSON.stringify({theme:ui.theme,profile:ui.profile,branch:ui.branch,pipelineView:ui.pipelineView}));} catch {}
+  try {localStorage.setItem(preferencesKey,JSON.stringify({theme:ui.theme,profile:ui.profile,branch:ui.branch}));} catch {}
 }
 function applyTheme(){
   document.documentElement.dataset.theme=ui.theme;
@@ -72,11 +75,13 @@ function useSnapshot(snapshot){
     const ids=new Set(clients.map(client=>client.id));
     const settings=m.settingsFor(rawState);
     state={...rawState,clients,tasks:rawState.tasks.filter(task=>ids.has(task.clientId)),
+      recoveries:rawState.recoveries.filter(entry=>ids.has(entry.clientId)),
       opportunities:rawState.opportunities.filter(deal=>ids.has(deal.clientId)),imports:[],
       agent:{...rawState.agent,lastRun:null,feedback:rawState.agent.feedback.filter(item=>owned.includes(item.branch))},
       settings:{...settings,branches:settings.branches.filter(branch=>owned.includes(branch.id)),
         users:settings.users.filter(user=>m.assignedBranches(user).some(branch=>owned.includes(branch)))}};
   }else state=rawState;
+  auditCache.clear();
   m.bindDirectory(state);
   if(ui.branch&&!m.byBranch(ui.branch))ui.branch='';
   if(!m.byBranch(ui.fallback))ui.fallback=m.branches[0]?.id||'';
@@ -93,8 +98,8 @@ async function run(command,{refresh=true}={}){
   }
 }
 function resetNav(){
-  ui.query='';ui.segment='';ui.taskStatus='open';ui.taskWhen='';ui.taskPriority='';ui.owner='mine';ui.clientSort='attention';
-  ui.clientLimit=12;ui.taskLimit=15;ui.dealLimit=12;ui.stage='open';ui.dealWindow='';ui.homeFilter='ready';ui.homeReason='';ui.homeLimit=8;ui.contactTab='ready';ui.contactClient='';ui.contactPinned=false;ui.visitWeek=0;ui.visitDay='';ui.mobileNav=false;
+  Object.assign(ui,{query:'',segment:'',clientSort:'money',clientLimit:12,homeFilter:'ready',homeReason:'',
+    homeLimit:8,contactTab:'ready',contactClient:'',contactPinned:false,mobileNav:false});
 }
 function go(page,filters={}){
   if(managerPages.has(page)&&!manager())page='home';
@@ -125,8 +130,8 @@ function shell(contents){
   const themeLabel=ui.theme==='light'?'Включить тёмную тему':'Включить светлую тему';
   return '<div class="layout"><aside class="sidebar'+(ui.mobileNav?' mobile-open':'')+'"><a href="#home" class="brand" data-action="navigate" data-id="home">'+logo+'<span><strong>GLAMOUR</strong><small>САЛОННАЯ CRM</small></span></a>'+
     '<div class="workspace"><span class="workspace-logo">'+icon('building',18)+'</span><span><strong>Сеть салонов</strong><small>GLAMOUR · Ижевск</small></span></div>'+
-    '<nav aria-label="Разделы"><p class="nav-caption">РАБОЧЕЕ ПРОСТРАНСТВО</p>'+navEntry('home')+navEntry('contacts')+navEntry('clients')+navEntry('tasks',taskCount)+navEntry('pipeline')+navEntry('visits')+navEntry('branches')+
-    (manager()?'<p class="nav-caption tools-caption">УПРАВЛЕНИЕ</p>'+navEntry('analytics')+navEntry('agent')+navEntry('import')+navEntry('settings'):'')+'</nav>'+
+    '<nav aria-label="Разделы"><p class="nav-caption">РАБОЧЕЕ ПРОСТРАНСТВО</p>'+navEntry('home')+navEntry('contacts',taskCount)+navEntry('clients')+
+    (manager()?'<p class="nav-caption tools-caption">УПРАВЛЕНИЕ</p>'+navEntry('agent')+navEntry('import')+navEntry('settings'):'')+'</nav>'+
     '<div class="sidebar-foot">'+(demoMode?'<div class="demo"><span></span> Деморежим</div>':'')+
     '<button class="profile" type="button" data-action="profile" aria-label="'+(serverMode?'Мой аккаунт':'Сменить демопрофиль')+'">'+avatar(p.name,manager()?1:0)+
     '<span class="profile-text"><strong>'+s(p.name)+'</strong><small>'+s(p.role)+'</small></span>'+icon('chevron',16)+'</button></div></aside>'+
@@ -139,35 +144,15 @@ function shell(contents){
 function heading(title,subtitle,actions=''){
   return '<section class="page-heading"><div><h1>'+s(title)+'</h1>'+(subtitle?'<p>'+s(subtitle)+'</p>':'')+'</div>'+(actions?'<div class="heading-actions">'+actions+'</div>':'')+'</section>';
 }
-function stat(name,value,detail,ic,tone,action='',id='',window=''){
+function stat(name,value,detail,ic,tone,action=''){
   const info='<div class="stat-top">'+iconBox(ic,tone)+'<span>'+s(name)+'</span></div><strong>'+s(typeof value==='number'?m.number(value):value)+'</strong><small>'+s(detail)+'</small>';
-  return action?'<button class="stat-card" data-action="'+action+'" data-id="'+id+'" data-window="'+window+'" type="button">'+info+'</button>':'<article class="stat-card">'+info+'</article>';
-}
-function due(task){
-  const day=m.today();
-  if(task.status==='done') return '<time datetime="'+s(task.due)+'">'+m.formatDate(task.due)+'</time>';
-  let label=m.formatDate(task.due), css='';
-  if(task.due===day){label='Сегодня';css='due-today';}
-  else if(task.due===m.shiftDate(day,1)) label='Завтра';
-  else if(task.due<day) css='due-late';
-  return '<time datetime="'+s(task.due)+'" title="'+s(m.longDate(task.due))+'" class="'+css+'">'+s(label)+'</time>';
-}
-function taskTable(tasks){
-  if(!tasks.length)return empty('Задач по этим условиям нет','Измените фильтры или назначьте новую задачу.','checkList');
-  const rows=tasks.map(task=>{
-    const client=m.byClient(state,task.clientId);
-    return '<tr><td><button type="button" class="identity" data-action="client" data-id="'+s(client.id)+'">'+clientAvatar(client)+'<span><strong>'+s(client.name)+'</strong><small>'+s(m.formatPhone(client.phone))+' · '+s(m.byBranch(client.branch).name)+'</small></span></button></td><td><button type="button" class="task-title" data-action="edit-task" data-id="'+s(task.id)+'">'+s(task.title)+'</button><small class="cell-note">'+s(reasonTitle(task.reason))+'</small></td>'+
-      '<td>'+s(m.byPerson(task.assignee)?.name||'—')+'</td>'+
-      '<td>'+badge(task.priority||'normal',priorities)+'</td><td class="nowrap">'+due(task)+displayDueTime(task)+'</td><td>'+badge(task.status)+(task.result?'<small class="cell-note">'+s(m.outcomes[task.result])+'</small>':'')+'</td><td class="row-end"><button class="row-button" type="button" data-action="edit-task" data-id="'+s(task.id)+'" aria-label="'+s('Открыть задачу '+task.title)+'">'+icon('right',16)+'</button></td></tr>';
-  }).join('');
-  return '<div class="table-wrap"><table><thead><tr><th>Клиент</th><th>Задача</th>'+'<th>Ответственный</th>'+'<th>Приоритет</th><th>Срок</th><th>Статус</th><th aria-label="Действия"></th></tr></thead><tbody>'+rows+'</tbody></table></div>';
+  return action?'<button class="stat-card" data-action="'+action+'" type="button">'+info+'</button>':'<article class="stat-card">'+info+'</article>';
 }
 const categoryOptions=keys=>keys.map(key=>[key,reasonTitle(key)]);
 const clientCategories=[...segmentKeys,'future','working','excluded','unknown','clear'];
-const displayDueTime=task=>task.dueTime?'<small class="cell-note">'+s(task.dueTime)+'</small>':'';
-const contactDraftFields=['result','followUp','followUpTime','appointment','visitTime','service','plannedInput','note'];
+const contactDraftFields=['result','followUp','followUpTime','paidAmount','paidDate','note'];
 function scopedContactGroups(){
-  return contactGroups(state,{branch:ui.branch,assignee:mine()});
+  return contactGroups(state,{branch:ui.branch,assignee:mine(),amounts:new Map(auditView().rows.map(row=>[row.client.id,row.amount]))});
 }
 function deskSelection(){
   const groups=scopedContactGroups();
@@ -185,11 +170,10 @@ function deskDraft(row){
   const key=[ui.profile,row.clientId,row.task?.id??''].join(':');
   if(!contactDrafts.has(key)){
     const client=m.byClient(state,row.clientId);
-    const deal=row.deal??state.opportunities.find(item=>item.clientId===client.id&&isOpen(item));
     const lastNote=m.clientHistory(state,client).find(event=>event.kind==='call'&&event.note)?.note;
     const fromHistory=Boolean(lastNote&&identifyObjection(lastNote)!=='other');
     contactDrafts.set(key,{objection:fromHistory?lastNote.slice(0,900):'',fromHistory,option:'',result:'',note:'',followUp:m.shiftDate(m.today(),1),followUpTime:'',
-      service:deal?.service||m.lastKnownVisit(state,client).service,plannedInput:moneyInput(deal?.planned),visitTime:'',appointment:''});
+      paidAmount:'',paidDate:m.today(),requestId:m.newId()});
   }
   return {key,values:contactDrafts.get(key)};
 }
@@ -208,7 +192,7 @@ function deskHistory(client){
   return '<section class="panel desk-panel"><div class="panel-head"><h2>История клиента</h2>'+iconBox('clock','stone')+'</div>'+
     (events.length?'<ol class="desk-history">'+events.map(event=>{
       const label=event.kind==='call'?m.outcomes[event.result]:event.kind==='payment'?'Оплата · '+money(event.amount):event.title;
-      const details=[event.assignee?m.byPerson(event.assignee)?.name:'',event.appointment?'Запись '+m.longDate(event.appointment):''].filter(Boolean);
+      const details=[event.assignee?m.byPerson(event.assignee)?.name:'',event.service||''].filter(Boolean);
       return '<li><span class="history-point"></span><div><div class="history-meta"><strong>'+s(label)+'</strong><time datetime="'+s(event.date)+'">'+s(m.formatDate(event.date))+'</time></div>'+
         (details.length?'<small>'+s(details.join(' · '))+'</small>':'')+(event.note?'<p>'+s(event.note)+'</p>':'')+'</div></li>';
     }).join('')+'</ol>':'<p class="desk-empty-history">Пока нет записей в истории.</p>')+'</section>';
@@ -249,17 +233,17 @@ function deskClientCard(row,index,rows){
   const excluded=client.callBlocked||client.invalidPhone;
   const callable=!excluded&&!(!row.task&&future)&&Boolean(row.assignee&&client.phone);
   const reason=row.task?.originReason||row.task?.reason||m.retentionReason(state,client);
-  const title=row.task?.title||(row.deal?nextStep(row.deal,m.today()):'Связаться с клиентом');
+  const title=row.task?.title||workSteps[reason]||'Связаться с клиентом';
   const owner=m.byPerson(row.assignee)?.name;
-  const deal=row.deal??state.opportunities.find(item=>item.clientId===client.id&&isOpen(item));
+  const estimate=auditView().rows.find(entry=>entry.client.id===client.id);
   const status=row.task?.status||'';
-  const latest=state.opportunities.filter(item=>item.clientId===client.id&&item.stage==='paid'&&item.actual!=null)
-    .sort((a,b)=>b.paymentDate.localeCompare(a.paymentDate))[0];
+  const latest=m.clientHistory(state,client).find(event=>event.kind==='payment');
   const when=row.due?[m.longDate(row.due),row.task?.dueTime].filter(Boolean).join(' · '):'Без срока';
   const canAdvance=index>=0&&rows.length>1;
   const fill=draft;
   const form='<form id="desk-contact-form" data-key="'+s(record.key)+'" data-client="'+s(client.id)+'" data-task="'+s(row.task?.id||'')+'">'+
-    '<div class="desk-form form-grid">'+outcomeFields(fill)+followUpFields(draft)+
+    '<div class="desk-form form-grid">'+outcomeFields(fill)+paymentFields(draft)+followUpFields(draft)+
+    '<input type="hidden" name="requestId" value="'+s(draft.requestId)+'">'+
     '<input type="hidden" name="assignee" value="'+s(row.assignee)+'">'+
     field('Комментарий','<textarea name="note" maxlength="1200" rows="3" placeholder="Что обсудили и о чём договорились">'+s(draft.note)+'</textarea>','wide')+
     '<div class="form-error wide" role="alert" hidden></div></div>'+
@@ -271,8 +255,10 @@ function deskClientCard(row,index,rows){
     (row.task?.priority==='high'?badge('high',priorities):'')+'</div>'+
     '<div class="desk-phone">'+icon('phone',19)+'<div><small>Телефон клиента</small><strong>'+s(m.formatPhone(client.phone))+'</strong></div>'+
     (client.phone?button('Копировать',null,'secondary small','copy-desk-phone','data-id="'+s(client.id)+'"'):'')+'</div>'+
-    '<div class="desk-reason"><div class="desk-kicker">Причина контакта</div><strong>'+s(reasonTitle(reason))+'</strong><p>'+s(title)+'</p>'+
-    '<div class="desk-task-meta">'+icon('calendar',16)+s(when)+(owner?'<span>'+s(owner)+'</span>':'')+(status?badge(status):'')+'</div></div>'+
+    '<div class="desk-audit"><small>Потенциал одной покупки</small><strong>'+s(estimate?.amount!=null?money(estimate.amount):'Нет оценки')+'</strong>'+
+    (estimate?.basis?'<span>'+s(priceLabels[estimate.basis])+'</span>':'')+'</div>'+
+    '<div class="desk-reason"><div class="desk-kicker">Причина контакта</div><strong>'+s(reasonTitle(reason))+'</strong><p>'+s(workSteps[reason]||title)+'</p>'+
+    '<div class="desk-task-meta">'+icon('clock',16)+s(when)+(owner?'<span>'+s(owner)+'</span>':'')+(status?badge(status):'')+'</div></div>'+
     (row.task?.note?'<p class="desk-task-note">'+s(row.task.note)+'</p>':'')+'</section>'+
     '<section class="panel desk-panel desk-result"><div class="panel-head"><h2>Результат контакта</h2>'+iconBox('checkList','pink')+'</div>'+
     (callable?form:'<p class="desk-empty-agent">'+s(excluded?'Клиент исключён из контактов.':future?'У клиента есть будущая запись.':'Нет номера телефона или ответственного.')+'</p>')+'</section></div>'+
@@ -280,16 +266,15 @@ function deskClientCard(row,index,rows){
     button('Полная карточка',null,'secondary small','client','data-id="'+s(client.id)+'"')+'</div>'+
     '<dl class="desk-facts">'+deskFact('Последний визит',last.lastVisit?m.longDate(last.lastVisit):'Нет данных')+
     deskFact('Визитов по выгрузке',client.visitCount)+deskFact('Последняя услуга',last.service||'—')+
-    deskFact('Запись',m.longDate(deal?.visitDate||client.nextBooking))+deskFact('Последняя отмена',m.longDate(client.lastCancellation))+
+    deskFact('Последняя отмена',m.longDate(client.lastCancellation))+
     deskFact('Сегмент',reasonTitle(m.retentionReason(state,client)))+'</dl>'+
-    (deal?.planned!=null||latest?'<dl class="desk-money">'+(deal?.planned!=null?deskFact('Сумма в работе',money(deal.planned)):'')+
-      (latest?deskFact('Последняя оплата',money(latest.actual)):'')+'</dl>':'')+'</section>'+deskHistory(client)+'</aside></div>';
+    (latest?'<dl class="desk-money">'+deskFact('Последняя подтверждённая оплата',money(latest.amount))+'</dl>':'')+'</section>'+deskHistory(client)+'</aside></div>';
 }
 function contactDeskPage(){
   const {groups,rows,row,index}=deskSelection();
   const controlButton=(label,direction,disabled)=>button(label,null,'secondary small','desk-move',
     'data-id="'+direction+'"'+(disabled||contactSaving?' disabled':''));
-  return heading('Работа с клиентами','',manager()?button('Назначить обзвон','plus','secondary','batch'):'')+
+  return heading('Очередь клиентов','',manager()?button('Назначить задачи','plus','secondary','batch'):'')+
     '<section class="panel desk-toolbar"><div class="desk-toolbar-tabs">'+tabs(Object.entries(contactTabs).map(([key,label])=>
       [key,label+' · '+m.number(groups[key].length)]),ui.contactTab,'desk-tab')+'</div><div class="desk-nav">'+
     controlButton('Предыдущий','prev',index<=0)+'<div class="desk-position" aria-live="polite">'+
@@ -301,7 +286,7 @@ function contactDeskPage(){
 function agentPage(){
   const config=agentState(state);
   return heading('Агент','',button('Подготовить очередь','checkList','primary','run-agent'))+
-    '<div class="agent-management"><section class="panel"><div class="panel-head"><div><h2>Автоматическое назначение</h2><p>По настроенным сегментам</p></div>'+
+    '<div class="agent-management"><section class="panel"><div class="panel-head"><div><h2>Автоматическое назначение</h2><p>Сначала клиенты с наибольшим потенциалом</p></div>'+
     tag(config.auto?'Включено':'Выключено',config.auto?'green':'slate')+'</div><form id="agent-settings-form"><div class="modal-body form-grid">'+
     '<label class="agent-check wide"><input type="checkbox" name="auto"'+(config.auto?' checked':'')+'>Автоматически назначать задачи после импорта</label>'+
     field('До задач на филиал в день',input('limit',config.limit,'number','required min="1" max="50"'))+
@@ -405,7 +390,7 @@ async function saveDeskResult(event){
     }
     render();
     if(ui.page==='contacts')document.querySelector('#contact-desk-client')?.focus();
-    notify(data.result==='booked'?'Клиент записан':terminalResults.has(data.result)?'Результат сохранён':
+    notify(data.result==='paid'?'Оплата подтверждена':terminalResults.has(data.result)?'Результат сохранён':
       'Повторный контакт: '+m.formatDate(data.followUp)+(data.followUpTime?' · '+data.followUpTime:''));
   }catch(error){
     contactSaving=false;
@@ -438,150 +423,86 @@ async function runAgentNow(button){
   }catch(error){button.disabled=false;notify(error.message,true);}
 }
 
-function bookingWeek(){
+function auditView(period=ui.period,branch=ui.branch){
   const day=m.today();
-  const weekday=(new Date(day+'T12:00:00Z').getUTCDay()+6)%7;
-  return m.shiftDate(day,ui.visitWeek*7-weekday);
+  const key=[branch,day,period].join(':');
+  if(!auditCache.has(key))auditCache.set(key,moneyAudit(state,{branch,day,period}));
+  return auditCache.get(key);
 }
-function branchBookings(){
-  return selectDeals(state,{branch:ui.branch,stage:'booked'}).sort((a,b)=>
-    a.visitDate.localeCompare(b.visitDate)||(a.visitTime||'99:99').localeCompare(b.visitTime||'99:99'));
-}
-function contactTime(date){
-  const day=m.today();
-  if(!date)return '<span class="secondary-text">Без срока</span>';
-  return due({status:'new',due:date});
-}
-function contactTable(rows){
-  if(!rows.length)return empty('Очередь свободна','', 'phone');
-  return '<div class="table-wrap"><table class="contact-table"><thead><tr><th>Клиент</th><th>Действие</th><th>Срок</th><th aria-label="Результат"></th></tr></thead><tbody>'+
-    rows.map(row=>{
-      const c=m.byClient(state,row.clientId);
-      const summary=row.task?.title||nextStep(row.deal,m.today());
-      const reason=row.task?.reason||m.retentionReason(state,c);
-      return '<tr><td><button class="identity" type="button" data-action="client" data-id="'+s(c.id)+'">'+clientAvatar(c)+
-        '<span><strong>'+s(c.name)+'</strong><small>'+s(m.byBranch(c.branch).name)+' · '+s(m.formatPhone(c.phone))+'</small></span></button></td>'+
-        '<td><span class="work-action">'+s(summary)+'</span><small class="cell-note">'+s(reasonTitle(reason))+(row.task?.priority==='high'?' · высокий приоритет':'')+'</small></td>'+
-        '<td class="nowrap">'+contactTime(row.due)+displayDueTime(row.task||{})+'</td><td class="row-end">'+button('Результат','phone','secondary small','quick-contact',
-          'data-id="'+s(c.id)+'"')+'</td></tr>';
-    }).join('')+'</tbody></table></div>';
-}
-function compactPipeline(){
-  const incoming=selectDeals(state,{branch:ui.branch,assignee:mine(),stage:'open'});
-  const total=incoming.some(item=>item.planned!=null)?incoming.reduce((sum,item)=>sum+(item.planned??0),0):null;
-  return '<section class="panel snapshot"><div class="panel-head"><div><h2>Воронка</h2><p>Сумма в работе</p></div>'+iconBox('funnel','pink')+'</div>'+
-    '<div class="snapshot-total">'+s(money(total))+'<small>'+m.number(incoming.length)+' клиентов</small></div><div class="snapshot-stages">'+
-    ['contact','interested','booked'].map(key=>{
-      const rows=incoming.filter(item=>item.stage===key);
-      const sum=rows.reduce((value,item)=>value+(item.planned??0),0);
-      return '<button class="snapshot-stage" type="button" data-action="work-pipeline" data-id="'+key+'"><span class="stage-mark '+stages[key].tone+'"></span>'+
-        '<span>'+stages[key].label+'</span><span>'+rows.length+'</span><strong>'+s(money(rows.length&&rows.every(item=>item.planned===null)?null:sum))+'</strong></button>';
-    }).join('')+'</div><div class="snapshot-foot">'+button('Открыть воронку',null,'secondary small','navigate','data-id="pipeline"')+'</div></section>';
-}
-function revenueChart(branch,days){
-  const day=m.today();
-  const from=m.shiftDate(day,1-days);
-  const byDay=new Map();
-  for(const deal of selectDeals(state,{branch,stage:'paid'})){
-    if(deal.paymentDate>=from&&deal.paymentDate<=day)byDay.set(deal.paymentDate,(byDay.get(deal.paymentDate)||0)+deal.actual);
-  }
-  const cols=days===7?7:6;
-  const perColumn=days/cols;
-  const groups=Array.from({length:cols},(_,index)=>{
-    const start=m.shiftDate(from,index*perColumn);
-    const end=m.shiftDate(start,perColumn-1);
-    let total=0;
-    for(const [date,value] of byDay)if(start<=date&&date<=end)total+=value;
-    return {start,end,total};
-  });
-  const highest=Math.max(1,...groups.map(group=>group.total));
-  return '<section class="panel revenue-panel"><div class="panel-head"><div><h2>Динамика выручки</h2><p>Оплаты за '+days+' дн.</p></div>'+
-    (ui.page==='analytics'?'':button('Отчёт',null,'secondary small','navigate','data-id="analytics"'))+'</div>'+
-    '<ol class="revenue-chart" aria-label="Выручка по датам">'+groups.map(group=>{
-      const interval=m.formatDate(group.start)+(group.end===group.start?'':' – '+m.formatDate(group.end));
-      const description=interval+': '+money(group.total);
-      return '<li aria-label="'+s(description)+'" title="'+s(description)+'"><div class="bar-area"><span class="bar-amount">'+s(group.total?money(group.total):'')+'</span>'+
-        '<span class="cash-bar" style="--height:'+Math.round(group.total/highest*74)+'%"></span></div><span class="bar-date">'+s(m.formatDate(group.start))+'</span></li>';
-    }).join('')+'</ol></section>';
-}
-function upcomingPanel(bookings){
-  return '<section class="panel"><div class="panel-head"><div><h2>Ближайшие записи</h2><p>Следующие 7 дней</p></div>'+
-    button('Расписание',null,'secondary small','navigate','data-id="visits"')+'</div><div class="upcoming-list">'+
-    (bookings.length?bookings.slice(0,4).map(deal=>{
-      const c=m.byClient(state,deal.clientId);
-      return '<button class="upcoming-item" type="button" data-action="edit-deal" data-id="'+s(deal.id)+'"><span class="mini-date">'+s(m.formatDate(deal.visitDate,{day:'numeric'}))+
-        '<small>'+s(m.formatDate(deal.visitDate,{month:'short'}))+'</small></span><span><strong>'+s(c.name)+'</strong><small>'+
-        s([deal.visitTime,deal.service||m.byBranch(c.branch).name].filter(Boolean).join(' · '))+'</small></span><strong>'+s(money(deal.planned))+'</strong></button>';
-    }).join(''):empty('Записей на этой неделе нет','','calendar'))+'</div></section>';
-}
+const workSteps={
+  cancellation:'Уточнить причину отмены и снять препятствие.',
+  regular:'Выяснить, почему перестал приходить, и предложить решение.',
+  single:'Узнать, как прошёл первый визит, и предложить подходящую услугу.',
+  inactive:'Напомнить о предыдущей услуге и уточнить, актуальна ли она.'
+};
 function home(){
-  const day=m.today();
-  const rows=m.contactQueue(state,{branch:ui.branch,assignee:mine()});
-  const late=rows.filter(row=>row.due&&row.due<day);
-  const ready=rows.filter(row=>row.due&&row.due<=day);
-  const contacts={ready,late,all:rows}[ui.homeFilter].filter(row=>!ui.homeReason||
-    (row.task?.reason||m.retentionReason(state,m.byClient(state,row.clientId)))===ui.homeReason);
-  const bookings=branchBookings().filter(deal=>deal.visitDate>=day&&deal.visitDate<=m.shiftDate(day,6));
-  const revenue=cashReport(ui.branch);
-  const eligible=m.metrics(state,ui.branch).attention;
-  return heading('Рабочий стол','',
-    '<span class="date-chip">'+icon('calendar',17)+s(cap(m.formatDate(day,{weekday:'long',day:'numeric',month:'long'})))+'</span>'+
-    button('Обрабатывать контакты','phone','primary','navigate','data-id="contacts"'))+
-    '<section class="stats work-stats" aria-label="Основные показатели">'+
-    stat('Контакты к сроку',ready.length,late.length?'Просрочено: '+late.length:'На сегодня','phone','berry','home-filter','ready')+
-    stat('Требуют внимания',eligible,'По правилам сегментации','target','pink','segment','focus')+
-    stat('Записи на 7 дней',bookings.length,bookings.some(deal=>deal.planned!=null)?money(bookings.reduce((sum,deal)=>sum+(deal.planned??0),0)):'Расписание','calendar','stone','navigate','visits')+
-    (manager()&&revenue.paidCount?stat('Выручка',money(revenue.revenue),'Оплачено за '+ui.period+' дн.','wallet','mint','navigate','analytics'):
-      stat('Задачи открыты',rows.length,'С назначенным контактом','checkList','mint','navigate','tasks'))+'</section>'+
-    '<div class="dashboard-grid work-grid"><section class="panel queue-panel"><div class="panel-head"><div><h2>Очередь контактов</h2><p>'+(mine()?'Мои клиенты':'Вся команда')+'</p></div>'+
-    (manager()?button('Назначить обзвон','plus','secondary small','batch'):'')+'</div><div class="queue-tabs queue-filters">'+
-    tabs([['ready','К сроку '+ready.length],['late','Просрочены '+late.length],['all','Все '+rows.length]],ui.homeFilter,'home-filter')+
-    filterSelect('homeReason','Причина задачи',[['','Все причины'],...categoryOptions([...segmentKeys,'followup','manual'])],ui.homeReason)+'</div>'+
-    contactTable(contacts.slice(0,ui.homeLimit))+(contacts.length>ui.homeLimit?footerCount(contacts.length,ui.homeLimit,'more-contacts'):'')+'</section>'+compactPipeline()+'</div>'+
-    '<div class="dashboard-grid work-grid">'+(manager()&&revenue.paidCount?revenueChart(ui.branch,ui.period):'')+upcomingPanel(bookings)+'</div>';
+  const audit=auditView();
+  const priced=audit.rows.length-audit.unknown;
+  const inProgress=audit.rows.filter(row=>row.working);
+  const workingAmount=inProgress.reduce((sum,row)=>sum+(row.amount??0),0);
+  const workingPriced=inProgress.some(row=>row.amount!==null);
+  const list=audit.rows.filter(row=>(!ui.homeReason||row.reason===ui.homeReason)&&
+    (ui.homeFilter==='all'||(ui.homeFilter==='working'?row.working:!row.working&&row.contactable&&!row.paused)));
+  const filtered=ui.homeReason?reasonTitle(ui.homeReason):'Кому уделить внимание';
+  const currentAi=aiReport?.state===state&&aiReport.branch===ui.branch?aiReport:null;
+  const actions=manager()?button('Импортировать базу','upload','secondary','navigate','data-id="import"')+
+    button('Открыть очередь','right','primary','navigate','data-id="contacts"'):
+    button('Моя очередь','right','primary','navigate','data-id="contacts"');
+  return heading('Деньги в базе','',actions)+
+    '<div class="money-kpis">'+
+    stat('Потенциал возврата',priced?money(audit.open):'—',m.number(priced)+' из '+m.number(audit.rows.length)+' клиентов с оценкой','wallet','berry')+
+    stat('Уже в работе',workingPriced?money(workingAmount):'—',m.number(inProgress.length)+' клиентов из общего потенциала','phone','pink','money-working')+
+    stat('Подтверждённые оплаты',money(audit.confirmed),m.number(audit.recorded.length)+' оплат за '+ui.period+' дн.','check','mint','payment-log')+
+    '</div><div class="money-panels"><section class="panel money-segments"><div class="panel-head"><div><h2>Где можно вернуть деньги</h2><p>Оценка одной покупки на клиента</p></div></div>'+
+    (audit.groups.length?'<div class="money-group-list">'+audit.groups.map(group=>{
+      const selected=ui.homeReason===group.reason;
+      const width=audit.open?group.amount/Math.max(...audit.groups.map(item=>item.amount))*100:0;
+      return '<button type="button" class="money-group" data-action="money-reason" data-id="'+s(group.reason)+'" aria-pressed="'+selected+'">'+
+        '<span class="money-group-label"><strong>'+s(reasonTitle(group.reason))+'</strong><small>'+m.number(group.count)+' в сегменте'+
+        (group.priced<group.count?' · '+m.number(group.priced)+' с оценкой':'')+'</small></span><strong>'+s(group.priced?money(group.amount):'—')+'</strong>'+
+        '<span class="money-track" aria-hidden="true"><span style="width:'+width.toFixed(2)+'%"></span></span></button>';
+    }).join('')+'</div>':empty('Нет клиентов на возврат',audit.total?'Проверьте данные о последних визитах.':'Загрузите клиентскую базу.','users'))+'</section>'+
+    '<section class="panel money-guide"><div class="panel-head"><div><h2>Следующее действие</h2><p>По текущему фильтру филиалов</p></div>'+iconBox('sparkle','berry')+'</div>'+
+    '<div class="money-guide-content">'+(audit.groups.length?'<strong>'+s(reasonTitle(audit.groups[0].reason))+'</strong><p>'+s(workSteps[audit.groups[0].reason])+'</p>':
+      '<strong>'+s(audit.total?'Проверить полноту выгрузки':'Загрузить клиентскую базу')+'</strong>')+
+    '<div class="money-guide-detail"><span>Без суммы в списке возврата</span><b>'+m.number(audit.unknown)+'</b></div>'+
+    '<div class="money-guide-detail"><span>Без даты визита в базе</span><b>'+m.number(audit.unclassified)+'</b></div>'+
+    '<div class="money-guide-detail"><span>Оценка по похожим клиентам</span><b>'+m.number(audit.estimated)+'</b></div>'+
+    (manager()&&aiAvailable?'<div class="money-ai">'+button(currentAi?.text?'Обновить рекомендации ИИ':'Получить рекомендации ИИ','sparkle','secondary small','money-ai',currentAi?.pending?'disabled':'')+
+      (currentAi?.pending?'<p role="status">ИИ анализирует результаты…</p>':currentAi?.text?'<p class="money-ai-text">'+s(currentAi.text)+'</p>':
+        currentAi?.error?'<p role="alert">'+s(currentAi.error)+'</p>':'')+'</div>':'')+'</div></section></div>'+
+    '<section class="panel money-clients" id="money-clients"><div class="panel-head"><div><h2>'+s(filtered)+'</h2><p>Сначала клиенты с наибольшим потенциалом</p></div>'+
+    (ui.homeReason?button('Все сегменты',null,'secondary small','money-reason','data-id="'+s(ui.homeReason)+'"'):'')+'</div>'+
+    '<div class="toolbar">'+tabs([['ready','Можно связаться'],['working','В работе'],['all','Весь список']],ui.homeFilter,'home-filter')+'</div>'+
+    (list.length?'<div class="table-wrap"><table><thead><tr><th>Клиент</th><th>Причина</th><th>Потенциал</th><th aria-label="Действия"></th></tr></thead><tbody>'+
+    list.slice(0,ui.homeLimit).map(({client,reason,amount,basis,working,contactable,paused})=>
+      '<tr><td><button class="identity" type="button" data-action="desk-client" data-id="'+s(client.id)+'">'+clientAvatar(client)+'<span><strong>'+s(client.name)+'</strong><small>'+
+      s(m.byBranch(client.branch)?.name||'')+'</small></span></button></td><td>'+badge(reason,reasons)+
+      (working?'<small class="cell-note">В работе</small>':!contactable?'<small class="cell-note">Нет телефона для контакта</small>':paused?'<small class="cell-note">Недавно связывались</small>':'')+'</td><td><strong class="nowrap">'+
+      s(amount===null?'Нет оценки':money(amount))+'</strong>'+(basis?'<small class="cell-note">'+s(priceLabels[basis])+'</small>':'')+
+      '</td><td class="row-end">'+button('Открыть','right','secondary small','desk-client','data-id="'+s(client.id)+'"')+'</td></tr>').join('')+
+    '</tbody></table></div>':empty('Нет клиентов по этому фильтру','','users'))+
+    footerCount(list.length,ui.homeLimit,'more-contacts')+'</section>';
 }
-
-function visitsPage(){
-  const day=m.today();
-  const start=bookingWeek();
-  const end=m.shiftDate(start,6);
-  const bookings=branchBookings();
-  const overdue=bookings.filter(deal=>deal.visitDate<day);
-  const visitHistory=selectDeals(state,{branch:ui.branch,stage:'paid'});
-  const week=[...bookings.filter(deal=>deal.visitDate>=day),...visitHistory]
-    .filter(deal=>deal.visitDate>=start&&deal.visitDate<=end)
-    .sort((a,b)=>a.visitDate.localeCompare(b.visitDate)||(a.visitTime||'99:99').localeCompare(b.visitTime||'99:99'));
-  const selected=ui.visitDay&&ui.visitDay>=start&&ui.visitDay<=end?ui.visitDay:'';
-  const filtered=selected?week.filter(deal=>deal.visitDate===selected):week;
-  return heading('Записи','',button('Эта неделя','calendar','secondary','week-current')+
-    button('Добавить запись','plus','primary','new-booking'))+
-    (overdue.length?'<section class="panel overdue-panel"><div class="panel-head"><div><h2>Проверьте результат визита</h2><p>'+
-      'Ожидают отметки: '+m.number(overdue.length)+'</p></div>'+iconBox('clock','amber')+'</div>'+visitTable(overdue)+'</section>':'')+
-    '<section class="panel"><div class="panel-head visit-head"><div><h2>'+s(m.formatDate(start))+' – '+s(m.formatDate(end))+'</h2><p>'+'Записей: '+m.number(week.length)+'</p></div><div class="week-actions">'+
-    button('Назад',null,'secondary small','week-prev')+button('Вперёд',null,'secondary small','week-next')+'</div></div>'+
-    '<div class="week-days">'+Array.from({length:7},(_,index)=>{
-      const date=m.shiftDate(start,index);
-      const count=week.filter(entry=>entry.visitDate===date).length;
-      return '<button type="button" class="week-day'+(date===day?' day-today':'')+'" aria-pressed="'+(selected===date)+
-        '" data-action="visit-day" data-id="'+date+'"><small>'+s(m.formatDate(date,{weekday:'short'}))+'</small><strong>'+s(m.formatDate(date,{day:'numeric'}))+
-        '</strong><span>'+count+'</span></button>';
-    }).join('')+'</div>'+visitTable(filtered)+'</section>';
+function paymentLog(){
+  const audit=auditView();
+  present(modalHead('Подтверждённые оплаты')+'<div class="drawer-body">'+
+    filterSelect('period','Период',[['7','Последние 7 дней'],['30','Последние 30 дней'],['90','Последние 90 дней']],String(ui.period))+
+    '<div class="money-paid-total"><strong>'+s(money(audit.confirmed))+'</strong><small>'+m.number(audit.recorded.length)+' оплат</small></div>'+
+    (audit.recorded.length?'<div class="table-wrap"><table><thead><tr><th>Клиент</th><th>Дата</th><th>Сумма</th><th>Ответственный</th></tr></thead><tbody>'+
+      audit.recorded.map(entry=>'<tr><td><button type="button" class="task-title" data-action="client" data-id="'+s(entry.clientId)+'">'+s(m.byClient(state,entry.clientId)?.name)+'</button></td><td class="nowrap">'+
+        s(m.formatDate(entry.date))+'</td><td class="nowrap">'+s(money(entry.amount))+'</td><td>'+s(m.byPerson(entry.assignee)?.name)+'</td></tr>').join('')+
+      '</tbody></table></div>':empty('Подтверждённых оплат за период нет','','wallet'))+'</div>','payments');
 }
-function visitTable(bookings){
-  if(!bookings.length)return empty('Записей нет','','calendar');
-  return '<div class="table-wrap"><table class="visit-table"><thead><tr><th>Дата и время</th><th>Клиент</th><th>Сумма</th><th aria-label="Действия"></th></tr></thead><tbody>'+
-    bookings.map(deal=>{
-      const c=m.byClient(state,deal.clientId);
-      const paid=deal.stage==='paid';
-      const ready=!paid&&deal.visitDate<=m.today();
-      return '<tr><td class="nowrap"><strong>'+s(m.formatDate(deal.visitDate))+'</strong><small class="cell-note">'+s(deal.visitTime||'Время не задано')+'</small></td><td>'+
-        '<button type="button" class="identity" data-action="client" data-id="'+s(c.id)+'">'+clientAvatar(c)+'<span><strong>'+s(c.name)+'</strong><small>'+
-        s(deal.service||m.byBranch(c.branch).name)+'</small></span></button></td><td class="nowrap"><strong>'+s(money(paid?deal.actual:deal.planned))+'</strong>'+
-        (paid?'<small class="cell-note">Оплачено</small>':'<small class="cell-note">План</small>')+'</td>'+
-        '<td class="row-end visit-cell">'+button('Изменить',null,'secondary small','edit-deal','data-id="'+s(deal.id)+'"')+
-        (ready?button('Не пришёл',null,'secondary small','visit-missed','data-id="'+s(deal.id)+'"')+
-          button('Оплата',null,'primary small','visit-pay','data-id="'+s(deal.id)+'"'):'')+'</td></tr>';
-    }).join('')+'</tbody></table></div>';
+async function analyzeMoney(){
+  if(!aiAvailable||!manager())return;
+  const current={branch:ui.branch,state,pending:true};
+  aiReport=current;
+  if(ui.page==='home')render();
+  try{current.text=(await repository.analyze({branch:current.branch})).analysis;}
+  catch(error){current.error=error.message;}
+  current.pending=false;
+  if(ui.page==='home'&&aiReport===current)render();
 }
 
 function searchInput(placeholder){
@@ -598,153 +519,28 @@ function footerCount(total,limit,action){
     (total>limit?button('Показать ещё',null,'secondary small',action):'')+'</div>';
 }
 function clientsPage(){
+  const audit=new Map(auditView().rows.map(row=>[row.client.id,row]));
   let list=state.clients.filter(c=>(!ui.branch||c.branch===ui.branch)&&m.matches(c,ui.query)
-    &&(!ui.segment||(ui.segment==='focus'?segmentKeys.includes(m.retentionReason(state,c)):
+    &&(!ui.segment||(ui.segment==='focus'?audit.has(c.id):
       ui.segment==='working'?m.displayedReason(state,c)==='working':m.retentionReason(state,c)===ui.segment)));
   list=list.map(client=>({...client,...m.lastKnownVisit(state,client)}));
   list.sort((a,b)=>ui.clientSort==='name'?a.name.localeCompare(b.name,'ru'):
-    (a.lastVisit||'9999').localeCompare(b.lastVisit||'9999')||a.name.localeCompare(b.name,'ru'));
+    (ui.clientSort==='money'?(audit.get(b.id)?.amount??0)-(audit.get(a.id)?.amount??0):0)||(a.lastVisit||'9999').localeCompare(b.lastVisit||'9999')||a.name.localeCompare(b.name,'ru'));
   const items=list.slice(0,ui.clientLimit).map(c=>{
+    const amount=audit.get(c.id)?.amount;
     const gap=c.lastVisit?m.dateDiff(m.today(),c.lastVisit):null;
     return '<tr><td><button class="identity" type="button" data-action="desk-client" data-id="'+s(c.id)+'">'+clientAvatar(c)+'<span><strong>'+s(c.name)+'</strong><small>'+s(m.formatPhone(c.phone))+'</small></span></button></td>'+
       '<td>'+s(m.byBranch(c.branch).name)+'</td><td>'+s(c.lastVisit?m.longDate(c.lastVisit):'Нет данных')+(gap!==null?'<small class="cell-note">'+m.number(gap)+' дн. назад</small>':'')+'</td><td>'+badge(m.retentionReason(state,c),reasons)+
-      (m.displayedReason(state,c)==='working'?'<small class="cell-note">Уже в работе</small>':'')+'</td>'+
+      (m.displayedReason(state,c)==='working'?'<small class="cell-note">Уже в работе</small>':'')+'</td><td>'+s(money(amount))+'</td>'+
       '<td class="row-end"><button class="row-button" type="button" data-action="client" data-id="'+s(c.id)+'" aria-label="'+s('Открыть карточку '+c.name)+'">'+icon('right',16)+'</button></td></tr>';
   }).join('');
   return heading('Клиенты','',button('Работа с клиентами','phone','primary','navigate','data-id="contacts"')+
-    (manager()?button('Импорт данных','upload','secondary','navigate','data-id="import"')+button('Назначить обзвон','plus','secondary','batch'):''))+
+    (manager()?button('Импорт данных','upload','secondary','navigate','data-id="import"')+button('Назначить задачи','plus','secondary','batch'):''))+
     '<section class="panel"><div class="toolbar">'+searchInput('Поиск по имени или телефону')+
     filterSelect('segment','Сегмент клиентов',[['','Все сегменты'],['focus','Требуют внимания'],...categoryOptions(clientCategories)],ui.segment)+
-    filterSelect('clientSort','Порядок сортировки',[['attention','По давности визита'],['name','По имени']],ui.clientSort)+'</div>'+
-    (list.length?'<div class="table-wrap"><table><thead><tr><th>Клиент</th><th>Филиал</th><th>Последний визит</th><th>Сегмент</th><th aria-label="Действия"></th></tr></thead><tbody>'+items+'</tbody></table></div>':
+    filterSelect('clientSort','Порядок сортировки',[['money','По потенциалу'],['attention','По давности визита'],['name','По имени']],ui.clientSort)+'</div>'+
+    (list.length?'<div class="table-wrap"><table><thead><tr><th>Клиент</th><th>Филиал</th><th>Последний визит</th><th>Сегмент</th><th>Потенциал</th><th aria-label="Действия"></th></tr></thead><tbody>'+items+'</tbody></table></div>':
     empty('Клиенты не найдены','Попробуйте изменить поиск или фильтры.','users'))+footerCount(list.length,ui.clientLimit,'more-clients')+'</section>';
-}
-function tasksPage(){
-  const assignee=ui.owner==='mine'?mine():ui.owner;
-  const list=m.queue(state,{branch:ui.branch,assignee,status:ui.taskStatus,when:ui.taskWhen,query:ui.query}).filter(task=>!ui.taskPriority||(task.priority||'normal')===ui.taskPriority);
-  return heading('Задачи','',button('Новая задача','plus','primary','new-task'))+
-    '<section class="panel"><div class="tab-wrap">'+tabs([['open','Открытые'],['new','К выполнению'],['progress','В работе'],['done','Выполненные'],['','Все']],ui.taskStatus,'status')+'</div><div class="toolbar">'+searchInput('Поиск по задаче или клиенту')+
-    filterSelect('owner','Ответственный',[...(mine()?[['mine','Мои задачи']]:[['mine','Вся команда']]),...m.people.filter(p=>p.branch).map(p=>[p.id,p.name]),...(mine()?[['','Вся команда']]:[])],ui.owner)+
-    filterSelect('taskWhen','Срок задачи',[['','Любой срок'],['today','Сегодня'],['late','Просрочено']],ui.taskWhen)+
-    filterSelect('taskPriority','Приоритет',[['','Любой приоритет'],...Object.entries(priorities).map(([key,value])=>[key,value.label])],ui.taskPriority)+'</div>'+
-    taskTable(list.slice(0,ui.taskLimit))+footerCount(list.length,ui.taskLimit,'more-tasks')+'</section>';
-}
-function branchesPage(){
-  const list=m.branches.filter(b=>!ui.branch||b.id===ui.branch);
-  return heading('Филиалы','')+'<div class="branch-grid">'+list.map(b=>{
-    const data=m.metrics(state,b.id);
-    const admin=m.people.find(p=>m.assignedBranches(p).includes(b.id));
-    return '<article class="panel branch-card"><div class="branch-head">'+iconBox('building',b.color==='pink'?'pink':'berry')+'<div><h2>'+s(b.name)+'</h2><p>'+s(b.label)+'</p></div></div><div class="branch-admin">'+(admin?avatar(admin.name,1)+'<div><strong>'+s(admin.name)+'</strong><small>Администратор</small></div>':'<span class="secondary-text">Администратор не назначен</span>')+'</div><dl><div><dt>Клиенты</dt><dd>'+m.number(data.total)+'</dd></div><div><dt>Требуют внимания</dt><dd>'+m.number(data.attention)+'</dd></div><div><dt>Открытые задачи</dt><dd>'+m.number(data.open)+'</dd></div></dl>'+button('Клиенты филиала',null,'secondary','open-branch','data-id="'+b.id+'"')+'</article>';
-  }).join('')+'</div>';
-}
-function cashReport(branch='',assignee=''){
-  const day=m.today();
-  return financeReport(state,{branch,assignee,day,from:m.shiftDate(day,1-ui.period),through:m.shiftDate(day,ui.period-1)});
-}
-function ownerFilter(){
-  return filterSelect('owner','Ответственный',[['mine',mine()?'Мои клиенты':'Вся команда'],
-    ...m.people.filter(p=>p.branch).map(p=>[p.id,p.name]),...(mine()?[['','Вся команда']]:[])],ui.owner);
-}
-function pipelinePage(){
-  const assignee=ui.owner==='mine'?mine():ui.owner;
-  const scoped=selectDeals(state,{branch:ui.branch,assignee});
-  const day=m.today();
-  const from=m.shiftDate(day,1-ui.period);
-  const upcomingEnd=m.shiftDate(day,ui.period-1);
-  const filtered=selectDeals(state,{branch:ui.branch,assignee,stage:ui.stage}).filter(deal=>{
-    if(ui.dealWindow==='revenue'&&(deal.paymentDate<from||deal.paymentDate>day))return false;
-    if(ui.dealWindow==='upcoming'&&(deal.visitDate<day||deal.visitDate>upcomingEnd))return false;
-    if(ui.dealWindow==='prospects'&&deal.stage!=='contact'&&deal.stage!=='interested')return false;
-    return m.matches(m.byClient(state,deal.clientId),ui.query)||deal.service.toLowerCase().includes(ui.query.trim().toLowerCase());
-  });
-  const windowLabel={revenue:'Оплаты за '+ui.period+' дн.',upcoming:'Записи на '+ui.period+' дн.',prospects:'До записи'}[ui.dealWindow];
-  const stageFilters=[['open','Открытые',scoped.filter(isOpen).length],...Object.entries(stages).map(([key,value])=>
-    [key,value.label,scoped.filter(deal=>deal.stage===key).length]),['','Все',scoped.length]];
-  const isBoard=ui.pipelineView==='board'&&!ui.dealWindow;
-  const viewSwitch=button(ui.pipelineView==='board'?'Список':'Доска',ui.pipelineView==='board'?'checkList':'grid',
-    'secondary small','switch-board',ui.dealWindow?'disabled':'');
-  return heading('Воронка','',
-    button('Добавить в воронку','plus','primary','new-deal'))+
-    '<section class="panel"><div class="tab-wrap">'+tabs(stageFilters.map(([key,label,count])=>[key,label+' · '+count]),ui.stage,'deal-stage')+'</div><div class="toolbar">'+
-    searchInput('Поиск по клиенту или услуге')+ownerFilter()+
-    (windowLabel?button(windowLabel+' · сбросить','close','secondary small','clear-deal-window'):'')+viewSwitch+'</div>'+
-    (isBoard?dealBoard(filtered):dealTable(filtered.slice(0,ui.dealLimit))+footerCount(filtered.length,ui.dealLimit,'more-deals'))+'</section>';
-}
-function dealBoard(list){
-  const keys=ui.stage==='open'?['contact','interested','booked']:ui.stage?[ui.stage]:Object.keys(stages);
-  return '<div class="board-wrap"><div class="deal-board" style="--columns:'+keys.length+'">'+keys.map(key=>{
-    const deals=list.filter(deal=>deal.stage===key);
-    const sum=deals.reduce((total,deal)=>total+((key==='paid'?deal.actual:deal.planned)??0),0);
-    return '<section class="board-column" aria-label="'+s(stages[key].label)+'"><div class="board-head">'+
-      '<span class="stage-mark '+stages[key].tone+'"></span><h2>'+s(stages[key].label)+'</h2><small>'+deals.length+'</small></div>'+
-      '<div class="board-total">'+s(money(sum))+'</div>'+
-      (deals.length?deals.slice(0,8).map(deal=>{
-        const c=m.byClient(state,deal.clientId);
-        const date=actionDate(deal);
-        return '<article class="deal-card"><button class="identity" type="button" data-action="client" data-id="'+s(c.id)+'">'+clientAvatar(c)+
-          '<span><strong>'+s(c.name)+'</strong><small>'+s(m.byBranch(c.branch).name)+'</small></span></button>'+
-          '<div class="deal-card-body"><strong>'+s(money(key==='paid'?deal.actual:deal.planned))+'</strong><small>'+s(deal.service||'Услуга не указана')+'</small></div>'+
-          '<div class="deal-card-footer">'+(isOpen(deal)?contactTime(date):'<small>'+s(key==='paid'?m.formatDate(deal.paymentDate):m.formatDate(deal.updated))+'</small>')+
-          button('Открыть',null,'secondary small','edit-deal','data-id="'+s(deal.id)+'"')+'</div></article>';
-      }).join(''):'<p class="board-empty">Нет записей</p>')+
-      (deals.length>8?button('Все записи ('+deals.length+')',null,'secondary small','stage-list','data-id="'+key+'"'):'')+
-      '</section>';
-  }).join('')+'</div></div>';
-}
-
-function dealTable(list){
-  if(!list.length)return empty('Записей по этим условиям нет','Измените фильтр или добавьте клиента в воронку.','funnel');
-  return '<div class="table-wrap"><table class="deal-table"><thead><tr><th>Клиент</th><th>Этап</th><th>Следующий шаг</th><th>Сумма</th><th aria-label="Действия"></th></tr></thead><tbody>'+
-    list.map(deal=>{
-      const client=m.byClient(state,deal.clientId);
-      const day=m.today();
-      const date=actionDate(deal);
-      const open=isOpen(deal);
-      const details=open?nextStep(deal,day):deal.stage==='paid'?'Оплата '+m.formatDate(deal.paymentDate):deal.reason;
-      const amount=deal.stage==='paid'?deal.actual:deal.planned;
-      return '<tr><td><button type="button" class="identity" data-action="client" data-id="'+s(client.id)+'">'+clientAvatar(client)+'<span><strong>'+s(client.name)+'</strong><small>'+s(deal.service||m.byBranch(client.branch).name)+'</small></span></button></td>'+
-        '<td>'+badge(deal.stage,stages)+'</td><td>'+(open?'<button type="button" class="task-title" data-action="deal-next" data-id="'+s(deal.id)+'">'+s(details)+'</button>':'<span>'+s(details)+'</span>')+
-        (open?'<small class="cell-note '+(date&&date<day?'due-late':'')+'">'+s(date?m.formatDate(date):'Срок не задан')+' · '+s(m.byPerson(deal.assignee)?.name)+'</small>':'')+'</td>'+
-        '<td class="nowrap"><strong>'+s(money(amount))+'</strong><small class="cell-note">'+(amount===null?'Сумма не указана':deal.stage==='paid'?'Факт':'План')+'</small></td>'+
-        '<td class="row-end">'+button('Открыть',null,'secondary small','edit-deal','data-id="'+s(deal.id)+'"')+'</td></tr>';
-    }).join('')+'</tbody></table></div>';
-}
-const reportFields={
-  detected:'Выявлено',issued:'Задач выдано',processed:'Клиентов обработано',connected:'Контакт состоялся',
-  interested:'Согласились записаться',booked:'Записи подтверждены',declined:'Отказались',overdue:'Просрочено',conversion:'Записи от контактов'
-};
-function reportTable(title,firstColumn,items,keys){
-  return '<section class="panel report-table"><div class="panel-head"><h2>'+s(title)+'</h2></div><div class="table-wrap"><table><thead><tr><th>'+s(firstColumn)+'</th>'+
-    keys.map(key=>'<th>'+s(reportFields[key])+'</th>').join('')+'</tr></thead><tbody>'+
-    items.map(([label,report])=>'<tr><td><strong>'+s(label)+'</strong></td>'+keys.map(key=>
-      '<td>'+s(key==='conversion'?(report.connected?Math.round(100*report.contactBooked/report.connected)+'%':'—'):
-        report[key]===null?'—':m.number(report[key]))+'</td>').join('')+'</tr>').join('')+'</tbody></table></div></section>';
-}
-function analyticsPage(){
-  const base={branch:ui.branch,days:ui.period,reason:ui.reportReason};
-  const report=m.retentionReport(state,base);
-  const cards=[
-    ['detected','Клиентов выявлено','target','berry','Сейчас в подходящих сегментах'],
-    ['issued','Задач выдано','checkList','stone','За выбранный период'],
-    ['processed','Клиентов обработано','users','pink','С зафиксированным результатом'],
-    ['connected','Контакт состоялся','phone','mint','Клиенты ответили'],
-    ['interested','Согласились записаться','repeat','pink','Согласие или подтверждённая запись'],
-    ['booked','Записи подтверждены','calendar','mint','Подтверждены вручную'],
-    ['declined','Отказались','users','stone','В том числе от следующих звонков'],
-    ['overdue','Задач просрочено','clock','berry','Открытые задачи со сроком в прошлом']
-  ];
-  const keys=['detected','issued','processed','connected','interested','booked','declined','overdue'];
-  const branches=m.branches.filter(item=>!ui.branch||ui.branch===item.id);
-  const personnel=m.people.filter(p=>p.branch&&(!ui.branch||m.assignedBranches(p).includes(ui.branch)));
-  const cash=cashReport(ui.branch);
-  return heading('Панель руководителя','',filterSelect('reportReason','Категория задач',[['','Все категории'],...segmentKeys.map(key=>[key,reasonTitle(key)])],ui.reportReason)+
-    filterSelect('period','Период отчёта',[['7','7 дней'],['30','30 дней'],['90','90 дней']],String(ui.period)))+
-    '<div class="stats finance-stats">'+cards.map(([key,label,ic,tone,detail])=>
-      stat(label,report[key],detail,ic,tone,key==='detected'?'segment':key==='overdue'?'task-filter':'',key==='detected'?(ui.reportReason||'focus'):'late')).join('')+'</div>'+
-    reportTable('Результаты по филиалам','Филиал',branches.map(branch=>[branch.name,m.retentionReport(state,{...base,branch:branch.id})]),keys)+
-    reportTable('Работа администраторов','Администратор',personnel.map(p=>[p.name,m.retentionReport(state,{...base,assignee:p.id})]),[...keys.slice(1),'conversion'])+
-    reportTable('Результаты по категориям','Причина',segmentKeys.map(reason=>[reasonTitle(reason),m.retentionReport(state,{...base,reason})]),keys)+
-    (!ui.reportReason&&cash.paidCount?'<div class="analytics-trend">'+revenueChart(ui.branch,ui.period)+'</div>':'');
 }
 function settingsPage(){
   const cfg=m.settingsFor(state);
@@ -794,7 +590,8 @@ async function submitMain(event){
       ui.profile=account.id;
       ui.branch='';
       useSnapshot(await repository.read());
-      go(manager()?'analytics':'home');
+      aiAvailable=Boolean(login.ai);
+      go(manager()?'home':'contacts');
     }else{
       const cfg=m.settingsFor(state);
       const rules=Object.fromEntries(Object.keys(rulesFields).map(key=>[key,data.get(key)]));
@@ -819,7 +616,7 @@ function mappingPanel(){
     '<div class="mapping-grid">'+Object.entries(fieldLabels).map(([key,label])=>field(label,
       '<span class="select-control"><select id="mapping-'+key+'" data-map="'+key+'">'+
       opts([['','Выберите столбец'],...layout.headers.map((header,index)=>[String(index),header||'Столбец '+(index+1)])],String(ui.importMapping[key]??''))+
-      icon('chevron',15)+'</span>')).join('')+'</div></details>';
+      '</select>'+icon('chevron',15)+'</span>')).join('')+'</div></details>';
 }
 function importPage(){
   const file=ui.importFile;
@@ -830,17 +627,17 @@ function importPage(){
     preview='<section class="panel import-preview"><div class="panel-head"><div><h2>Предпросмотр импорта</h2><p>'+s(file.name)+(file.sheet?' · Лист «'+s(file.sheet)+'»':'')+'</p></div></div><div class="import-counters">'+
       tag(m.number(result.added)+' новых','green')+tag(m.number(result.updated)+' к обновлению','berry')+
       tag(m.number(result.duplicates)+' без изменений или дублей','slate')+tag(m.number(result.issues.length)+' с ошибками',result.issues.length?'red':'slate')+'</div>'+
-      (examples.length?'<div class="table-wrap"><table><thead><tr><th>Клиент</th><th>Филиал</th><th>Последний визит</th><th>Визитов</th><th>Действие</th></tr></thead><tbody>'+
+      (examples.length?'<div class="table-wrap"><table><thead><tr><th>Клиент</th><th>Филиал</th><th>Последний визит</th><th>Сумма из файла</th><th>Действие</th></tr></thead><tbody>'+
       examples.map(c=>'<tr><td><strong>'+s(c.name)+'</strong><small class="cell-note">'+s(m.formatPhone(c.phone))+'</small></td><td>'+s(m.byBranch(c.branch).name)+
-        '</td><td>'+s(c.lastVisit?m.longDate(c.lastVisit):'Нет данных')+'</td><td>'+s(c.visitCount??'—')+'</td><td>'+s(c.operation)+'</td></tr>').join('')+
+        '</td><td>'+s(c.lastVisit?m.longDate(c.lastVisit):'Нет данных')+'</td><td>'+s(money(c.meanCheck??c.lastPaid??c.lifetimePaid))+'</td><td>'+s(c.operation)+'</td></tr>').join('')+
       '</tbody></table></div>':empty('Новых данных для сохранения нет','','file'))+
       (result.issues.length?'<details class="import-issues" open><summary>Ошибки в строках</summary><ul>'+result.issues.slice(0,20).map(issue=>'<li>Строка '+issue.row+' · '+s(issue.reason)+'</li>').join('')+'</ul>'+
       (result.issues.length>20?'<p>Показано 20 из '+result.issues.length+' ошибок.</p>':'')+'</details>':'')+
       '<div class="table-footer"><span>Ошибки и дубли пропускаются. История контактов сохраняется.</span>'+
-      button('Сохранить базу','check','primary','commit-import',!result.records.length||ui.importBusy?'disabled':'')+'</div></section>';
+      button('Загрузить и проанализировать','check','primary','commit-import',!result.records.length||ui.importBusy?'disabled':'')+'</div></section>';
   }
   return heading('Импорт данных','',button('Тестовый CSV','download','secondary','template'))+
-    '<section class="panel import-box"><div class="panel-head"><div><h2>Загрузка файла</h2><p>CSV, XLSX или XLS · до 15 МБ</p></div>'+iconBox('upload','berry')+'</div><div class="import-body">'+
+    '<section class="panel import-box"><div class="panel-head"><div><h2>Загрузка файла</h2><p>CSV, XLSX или XLS · до 15 МБ</p><p>Для расчёта добавьте средний чек, последнюю оплату или сумму оплат и число визитов.</p></div>'+iconBox('upload','berry')+'</div><div class="import-body">'+
     (demoMode?'<div class="hint import-demo">Для демо используйте только вымышленные данные. Пример номера: +7 (000) 000-04-01.</div>':'')+
     '<div class="dropzone" id="dropzone"><input id="import-file" type="file" class="sr-only" accept=".csv,.xlsx,.xls" tabindex="-1">'+iconBox(file?'file':'upload','berry')+
     '<strong>'+s(file?.name||'Перетащите файл сюда')+'</strong><p>'+s(ui.importBusy?'Обработка файла…':'или выберите файл на устройстве')+'</p>'+
@@ -852,7 +649,7 @@ function importPage(){
     state.imports.slice(0,10).map(x=>'<tr><td>'+s(x.name)+'</td><td>'+s(m.longDate(x.date))+'</td><td>'+m.number(x.added)+'</td><td>'+m.number(x.updated??0)+'</td></tr>').join('')+'</tbody></table></div></section>':'');
 }
 
-const views={home,contacts:contactDeskPage,agent:agentPage,clients:clientsPage,tasks:tasksPage,pipeline:pipelinePage,visits:visitsPage,branches:branchesPage,analytics:analyticsPage,import:importPage,settings:settingsPage};
+const views={home,contacts:contactDeskPage,agent:agentPage,clients:clientsPage,import:importPage,settings:settingsPage};
 function render(preserveFocus=false){
   const focused=preserveFocus&&document.activeElement?.id;
   const caret=focused==='query'?document.activeElement.selectionStart:null;
@@ -900,33 +697,29 @@ function clientModal(id){
   const visits=m.clientHistory(state,c);
   const last=m.lastKnownVisit(state,c);
   const tasks=state.tasks.filter(task=>task.clientId===id&&task.status!=='done').sort((a,b)=>a.due.localeCompare(b.due));
-  const clientDeals=selectDeals(state).filter(deal=>deal.clientId===id);
-  const openDeal=clientDeals.find(isOpen);
-  const appointments=clientDeals.filter(deal=>deal.stage==='booked'&&deal.visitDate>=m.today());
   present(modalHead('Карточка клиента')+'<div class="drawer-body"><div class="client-profile">'+clientAvatar(c)+'<div><h3>'+s(c.name)+'</h3><p>'+s(m.byBranch(c.branch).label)+'</p></div>'+badge(m.retentionReason(state,c),reasons)+'</div><div class="client-actions">'+
-    (c.callBlocked||c.invalidPhone?'':button('Зафиксировать звонок','phone','primary','call','data-id="'+s(id)+'"')+
+    (c.callBlocked||c.invalidPhone?'':button('Открыть в очереди','phone','primary','desk-client','data-id="'+s(id)+'"')+
     button('Новая задача','plus','secondary','new-task','data-id="'+s(id)+'"'))+
-    (openDeal?button('Открыть воронку','funnel','secondary','edit-deal','data-id="'+s(openDeal.id)+'"'):
-      c.callBlocked||c.invalidPhone?'':button('Добавить в воронку','funnel','secondary','new-deal','data-id="'+s(id)+'"'))+'</div>'+
+    ((mine()||defaultAssignee(c.branch))?button('Подтвердить оплату','wallet','secondary','confirm-payment','data-id="'+s(id)+'"'):'')+'</div>'+
     '<dl class="client-facts"><div><dt>Телефон</dt><dd>'+s(m.formatPhone(c.phone))+'</dd></div><div><dt>Последний визит</dt><dd>'+s(last.lastVisit?m.longDate(last.lastVisit):'Нет данных')+'</dd></div><div><dt>Дата регистрации</dt><dd>'+s(m.longDate(c.registered))+'</dd></div><div><dt>Последняя услуга</dt><dd>'+s(last.service||'—')+'</dd></div><div><dt>Завершённых визитов по выгрузке</dt><dd>'+s(c.visitCount??'—')+'</dd></div>'+
-    '<div><dt>Следующая запись по выгрузке</dt><dd>'+s(m.longDate(c.nextBooking))+'</dd></div><div><dt>Последняя отмена</dt><dd>'+s(m.longDate(c.lastCancellation))+'</dd></div>'+
+    '<div><dt>Последняя отмена</dt><dd>'+s(m.longDate(c.lastCancellation))+'</dd></div>'+
     '<div><dt>Отмен по выгрузке</dt><dd>'+s(c.cancelCount??'—')+'</dd></div></dl>'+
     (c.callBlocked||c.invalidPhone?'<div class="hint"><span>'+s(c.callBlocked?'Клиент просит больше не связываться.':'Телефон отмечен как неактуальный.')+'</span></div>':'')+
-    (openDeal&&openDeal.stage!=='booked'?'<section class="drawer-section"><h3>Возврат клиента</h3><div class="drawer-line">'+iconBox('funnel','berry')+
-      '<div><strong>'+s(stages[openDeal.stage].label)+'</strong><small>'+s(nextStep(openDeal,m.today()))+'</small></div><strong class="appointment-price">'+s(money(openDeal.planned))+'</strong></div></section>':'')+
-    (appointments.length?'<section class="drawer-section"><h3>Предстоящие записи</h3>'+appointments.map(event=>'<div class="drawer-line">'+iconBox('calendar','mint')+'<div><strong>'+s(m.longDate(event.visitDate))+'</strong><small>'+s(event.service||'Повторный визит')+'</small></div><strong class="appointment-price">'+s(money(event.planned))+'</strong></div>').join('')+'</section>':'')+
     '<section class="drawer-section"><h3>История взаимодействий</h3>'+
     (visits.length?'<div class="timeline">'+visits.map(event=>'<article>'+iconBox(typeIcon[event.kind]||'file',event.kind==='call'?'berry':'stone')+'<div><strong>'+s(event.kind==='call'?m.outcomes[event.result]:event.kind==='payment'?'Оплата · '+money(event.amount):event.title)+'</strong><small>'+s(m.longDate(event.date))+(event.assignee?' · '+s(m.byPerson(event.assignee)?.name||''):'')+'</small>'+
-    (event.note?'<p>'+s(event.note)+'</p>':'')+(event.kind==='payment'&&event.service?'<p>'+s(event.service)+'</p>':'')+(event.appointment?'<p>Запись на '+s(m.longDate(event.appointment))+(event.service?' · '+s(event.service):'')+(event.planned!==null&&event.planned!==undefined?' · '+s(money(event.planned)):'')+'</p>':'')+'</div></article>').join('')+'</div>':
+    (event.note?'<p>'+s(event.note)+'</p>':'')+(event.kind==='payment'&&event.service?'<p>'+s(event.service)+'</p>':'')+'</div></article>').join('')+'</div>':
     '<p class="secondary-text">Пока нет записей в истории.</p>')+'</section>'+
     (tasks.length?'<section class="drawer-section"><h3>Открытые задачи</h3>'+tasks.map(task=>'<div class="drawer-line">'+iconBox('checkList','berry')+'<div><button type="button" class="task-title" data-action="edit-task" data-id="'+s(task.id)+'">'+s(task.title)+'</button><small>'+s(m.byPerson(task.assignee)?.name)+' · '+s(m.longDate(task.due))+'</small></div>'+badge(task.status)+'</div>').join('')+'</section>':'')+'</div>','client',{id});
 }
-function outcomeFields(data={},options=[['','Выберите результат'],...Object.entries(m.outcomes)]){
-  return '<div class="result-fields">'+field('Результат звонка',select('result',options,data.result||'',true))+
-    '<div class="booking-fields form-grid">'+field('Дата повторной записи',input('appointment',data.appointment||'','date','required'))+
-    field('Время',input('visitTime',data.visitTime||'','time'))+
-    field('Услуга',input('service',data.service||'','text','maxlength="120" placeholder="Например, маникюр"'))+
-    field('Плановая сумма, ₽',input('plannedInput',data.plannedInput??moneyInput(data.planned),'text','maxlength="16" inputmode="decimal" placeholder="Например, 2 450"'))+'</div></div>';
+function outcomeFields(data={},inTask=false){
+  const options=[['','Выберите результат'],...Object.entries(m.outcomes).filter(([key])=>
+    (key!=='booked'&&(!inTask||key!=='paid'))||key===data.result)];
+  return '<div class="result-fields">'+field('Результат контакта',select('result',options,data.result||'',true))+'</div>';
+}
+function paymentFields(data={},hidden=true){
+  return '<div class="field-group" data-payment'+(hidden?' hidden':'')+'>'+
+    field('Фактическая оплата, ₽',input('paidAmount',data.paidAmount||'','text','required inputmode="decimal" maxlength="20" placeholder="Например, 2 450"'))+
+    field('Дата оплаты',input('paidDate',data.paidDate||m.today(),'date','required max="'+m.today()+'"'))+'</div>';
 }
 function taskModal(id='',clientId=''){
   const task=state.tasks.find(item=>item.id===id);
@@ -939,17 +732,17 @@ function taskModal(id='',clientId=''){
     '<form id="task-form"><div class="modal-body form-grid">'+
     (task?'<input type="hidden" name="clientId" value="'+s(task.clientId)+'">':
       field('Клиент',select('clientId',[['','Выберите клиента'],...available.filter(c=>!c.callBlocked&&!c.invalidPhone).map(c=>[c.id,c.name+' · '+m.byBranch(c.branch).name])],d.clientId,true),'wide'))+
-    field('Название задачи',input('title',d.title,'text','required maxlength="140" placeholder="Например, предложить повторный визит" autofocus'),'wide')+
+    field('Название задачи',input('title',d.title,'text','required maxlength="140" placeholder="Например, уточнить, почему клиент не вернулся" autofocus'),'wide')+
     field('Ответственный',select('assignee',assignees().map(p=>[p.id,p.name]),d.assignee,true))+
     field('Срок выполнения',input('due',d.due,'date','required'))+
     field('Время задачи',input('dueTime',d.dueTime||'','time'))+
     field('Приоритет',select('priority',Object.entries(priorities).map(([key,value])=>[key,value.label]),d.priority||'normal',true))+
     (task?'<p class="secondary-text wide">Причина: '+s(reasonTitle(task.reason))+'</p>':'')+
     field('Статус',select('status',Object.entries(m.statuses).map(([key,value])=>[key,value.label]),d.status,true),'wide')+
-    outcomeFields(d)+followUpFields()+field('Комментарий','<textarea name="note" maxlength="1200" rows="3" placeholder="Детали для следующего контакта">'+s(d.note)+'</textarea>','wide')+
+    outcomeFields(d,true)+followUpFields()+field('Комментарий','<textarea name="note" maxlength="1200" rows="3" placeholder="Детали для следующего контакта">'+s(d.note)+'</textarea>','wide')+
     (task?.activity?.length?'<details class="wide activity"><summary>История задачи</summary><ul>'+task.activity.slice().reverse().slice(0,20).map(event=>
       '<li>'+s(m.formatDate(event.date))+' · '+s(event.title)+(event.actor?' · '+s(m.byPerson(event.actor)?.name||event.actor):'')+'</li>').join('')+'</ul></details>':'')+
-    '<div class="form-error wide" role="alert" hidden></div></div>'+modalFoot(task?'Сохранить задачу':'Создать задачу',task?'check':'plus')+'</form>','task',{id,clientId});
+    '<div class="form-error wide" role="alert" hidden></div></div>'+modalFoot(task?'Сохранить задачу':'Создать задачу',task?'check':'plus')+'</form>','task',{id,clientId,appointment:task?.appointment,service:task?.service});
   toggleOutcome();
 }
 function followUpFields(data={}){
@@ -958,30 +751,23 @@ function followUpFields(data={}){
     field('Следующий контакт',input('followUp',data.followUp||m.shiftDate(day,1),'date','min="'+day+'" required'))+
     field('Время повторного звонка',input('followUpTime',data.followUpTime||'','time'))+'</div>';
 }
-function quickContact(id,taskId='',assigned=''){
+function confirmPayment(id){
   const client=m.byClient(state,id);
-  const fromClient=modal?.type==='client'&&dialog.open;
-  const task=taskId?state.tasks.find(item=>item.id===taskId):
-    fromClient?m.queue(state,{assignee:mine(),status:'open'}).find(item=>item.clientId===id):null;
-  if(!client||client.callBlocked||client.invalidPhone)return;
-  const assignee=assigned||task?.assignee||mine()||defaultAssignee(client.branch);
-  const active=state.opportunities.find(item=>item.clientId===id&&isOpen(item));
-  const options=[['','Выберите результат'],...Object.entries(m.outcomes)];
-  present(modalHead('Результат контакта',client.name+' · '+m.formatPhone(client.phone))+
-    '<form id="quick-contact-form"><div class="modal-body form-grid">'+
-    (task?'<div class="contact-reference wide">'+icon('checkList',17)+'<span>'+s(task.title)+'</span></div>':'')+
-    outcomeFields({planned:active?.planned,service:active?.service||m.lastKnownVisit(state,client).service},options)+
-    followUpFields()+
-    field('Ответственный',select('assignee',assignees().map(p=>[p.id,p.name]),assignee,true),'wide')+
-    field('Комментарий','<textarea name="note" maxlength="1200" rows="2" placeholder="Договорённости"></textarea>','wide')+
-    '<div class="form-error wide" role="alert" hidden></div></div>'+modalFoot('Сохранить')+'</form>','contact',{id,taskId:task?.id||'',fromClient});
-  toggleOutcome();
+  const preferred=client&&(mine()||defaultAssignee(client.branch));
+  if(!preferred)return;
+  const staff=assignees().filter(person=>m.assignedBranches(person).includes(client.branch));
+  present(modalHead('Подтверждение оплаты',client.name)+'<form id="payment-form"><div class="modal-body form-grid">'+
+    '<input type="hidden" name="result" value="paid"><input type="hidden" name="requestId" value="'+s(m.newId())+'">'+
+    paymentFields({},false)+
+    field('Ответственный',select('assignee',staff.map(person=>[person.id,person.name]),preferred,true),'wide')+
+    field('Комментарий','<textarea name="note" maxlength="1200" rows="2"></textarea>','wide')+
+    '<div class="form-error wide" role="alert" hidden></div></div>'+modalFoot('Подтвердить оплату')+'</form>','payment',{id});
 }
 function batchModal(){
   const branch=ui.branch||person().branch||m.branches[0].id;
   const assignee=defaultAssignee(branch);
   const day=m.today();
-  present(modalHead('Назначить обзвон')+'<form id="batch-form"><div class="modal-body form-grid">'+
+  present(modalHead('Назначить задачи')+'<form id="batch-form"><div class="modal-body form-grid">'+
     field('Филиал',select('branch',m.branches.map(b=>[b.id,b.label]),branch,true))+
     field('Ответственный','<span class="select-control"><select name="assignee" required></select>'+icon('chevron',15)+'</span>')+
     field('Клиенты',select('group',[['focus','Все, кто требует внимания'],...categoryOptions(segmentKeys)],'focus',true),'wide')+
@@ -996,7 +782,7 @@ function batchPreview(){
   const form=dialog.querySelector('#batch-form');
   const {branch,group,count,assignee}=form.elements;
   assignee.innerHTML=opts(assignees().filter(p=>m.assignedBranches(p).includes(branch.value)).map(p=>[p.id,p.name]),assignee.value);
-  const size=Math.min(Number(count.value),m.availableForContact(state,branch.value,group.value).length);
+  const size=Math.min(Number(count.value),auditView(ui.period,branch.value).rows.filter(row=>row.contactable&&!row.working&&!row.paused&&(group.value==='focus'||row.reason===group.value)).length);
   form.querySelector('#batch-count').textContent='Будет назначено задач: '+m.number(size);
   form.querySelector('[type="submit"]').disabled=!size||!assignee.value;
 }
@@ -1016,73 +802,18 @@ function updateQuickSearch(){
   ).join('')||(query?'<p class="secondary-text">Клиенты не найдены</p>':'');
 }
 
-function dealModal(id='',clientId='',nextStage=''){
-  const deal=state.opportunities.find(item=>item.id===id);
-  const client=m.byClient(state,deal?.clientId||clientId);
-  const day=m.today();
-  const newBooking=!deal&&nextStage==='booked';
-  const available=state.clients.filter(c=>(!ui.branch||c.branch===ui.branch)&&
-    !state.opportunities.some(item=>item.clientId===c.id&&isOpen(item)&&(!newBooking||item.stage==='booked')))
-    .sort((a,b)=>a.name.localeCompare(b.name,'ru'));
-  const assignee=deal?.assignee||mine()||defaultAssignee(client?.branch||ui.branch)||assignees()[0]?.id;
-  const options=Object.entries(stages).filter(([key])=>deal?.stage!=='paid'||key==='paid').map(([key,value])=>[key,value.label]);
-  const clientField=client
-    ? '<input type="hidden" name="clientId" value="'+s(client.id)+'">'
-    : field('Клиент',select('clientId',[['','Выберите клиента'],...available.map(c=>[c.id,c.name+' · '+m.byBranch(c.branch).name])],'',true),'wide');
-  const planned=field('Плановая сумма, ₽',input('plannedInput',moneyInput(deal?.planned),'text','maxlength="16" inputmode="decimal" placeholder="Например, 2 450"'));
-  const group=(type,content)=>'<div class="field-group '+type+'" data-deal-fields="'+type+'">'+content+'</div>';
-  const backToClient=modal?.type==='client'&&dialog.open?modal.id:'';
-  const due=nextStage&&nextStage!==deal?.stage&&deal?.due<day?day:deal?.due||day;
-  present(modalHead(newBooking?'Добавить запись':nextStage==='paid'?'Визит и оплата':deal?'Этап воронки':'Добавить в воронку',client?.name||'Выберите клиента и задайте следующий шаг.')+
-    '<form id="deal-form"><div class="modal-body form-grid">'+clientField+
-    field('Этап',select('stage',options,nextStage||deal?.stage||'contact',true))+
-    field('Ответственный','<span class="select-control"><select name="assignee" required></select>'+icon('chevron',15)+'</span>')+
-    field('Услуга',input('service',deal?.service||client?.service,'text','maxlength="120" placeholder="Например, маникюр с покрытием"'))+planned+
-    group('outreach',field('Срок следующего шага',input('due',due,'date')))+
-    group('visit',field('Дата визита',input('visitDate',deal?.visitDate||day,'date','required'))+
-      field('Время',input('visitTime',deal?.visitTime||'','time')))+
-    group('cash',field('Фактически оплачено, ₽',input('actualInput',moneyInput(deal?.actual??deal?.planned),'text','required maxlength="16" inputmode="decimal"'))+
-      field('Дата оплаты',input('paymentDate',deal?.paymentDate||day,'date','required max="'+day+'"')))+
-    group('lost',field('Причина закрытия',input('reason',deal?.reason||(nextStage==='lost'?'Клиент не пришёл':''),'text','required maxlength="240" placeholder="Например, клиент изменил планы"'),'wide'))+
-    field('Комментарий','<textarea name="note" maxlength="1200" rows="2" placeholder="Договорённости и детали">'+s(deal?.note)+'</textarea>','wide')+
-    '<div class="form-error wide" role="alert" hidden></div></div>'+modalFoot(deal?'Сохранить':'Добавить')+'</form>',
-    'deal',{id,backToClient,newBooking});
-  toggleDealFields();
-}
-function toggleDealFields(){
-  const form=dialog.querySelector('#deal-form');
-  if(!form)return;
-  const {value:stage}=form.elements.stage;
-  const visible={
-    outreach:stage==='contact'||stage==='interested',
-    visit:stage==='booked'||stage==='paid',
-    cash:stage==='paid',
-    lost:stage==='lost'
-  };
-  for(const group of form.querySelectorAll('[data-deal-fields]')){
-    group.hidden=!visible[group.dataset.dealFields];
-    for(const field of group.querySelectorAll('input'))field.disabled=group.hidden;
-  }
-  const visit=form.elements.visitDate;
-  if(stage==='paid')visit.max=m.today();
-  else visit.removeAttribute('max');
-  if(modal.newBooking&&stage==='booked')visit.min=m.today();
-  else visit.removeAttribute('min');
-}
-
 function toggleOutcome(form=dialog.querySelector('form')){
   if(!form) return;
   const status=form.elements.namedItem('status');
   const result=form.elements.namedItem('result');
   const selected=!status||status.value==='done';
-  const booked=selected&&result.value==='booked';
+  const payment=form.querySelector('[data-payment]');
   form.querySelector('.result-fields').hidden=!selected;
   result.disabled=!selected;
-  form.querySelector('.booking-fields').hidden=!booked;
-  form.elements.appointment.disabled=!booked;
-  form.elements.service.disabled=!booked;
-  form.elements.visitTime.disabled=!booked;
-  form.elements.plannedInput.disabled=!booked;
+  if(payment){
+    payment.hidden=!selected||result.value!=='paid';
+    for(const field of payment.querySelectorAll('input'))field.disabled=payment.hidden;
+  }
   const next=form.querySelector('[data-follow-up]');
   if(next){
     const historical=form.id==='task-form'&&modal?.type==='task'&&state.tasks.some(task=>task.id===modal.id&&task.status==='done'&&task.result===result.value);
@@ -1090,7 +821,6 @@ function toggleOutcome(form=dialog.querySelector('form')){
     form.elements.followUp.disabled=next.hidden;
     form.elements.followUpTime.disabled=next.hidden;
     form.elements.followUpTime.required=!next.hidden&&result.value==='callback';
-    form.elements.appointment.min=m.today();
   }
 }
 
@@ -1124,7 +854,8 @@ async function commitImport(){
     ui.importLayout=null;
     ui.importMapping=null;
     ui.importPreview=null;
-    go('clients',{segment:'focus'});
+    go('home');
+    if(aiAvailable)void analyzeMoney();
     notify('Добавлено: '+m.number(added)+' · обновлено: '+m.number(updated)+(duplicates?' · без изменений: '+m.number(duplicates):'')+(conflicts?' · конфликты: '+m.number(conflicts):'')+(assigned?' · задач от агента: '+m.number(assigned):''));
   }catch(err){ui.importError='Сохранение не удалось. '+err.message;}
   finally{ui.importBusy=false;render();}
@@ -1147,37 +878,22 @@ document.addEventListener('click',event=>{
     case 'nav-toggle': ui.mobileNav=!ui.mobileNav;render();break;
     case 'theme': ui.theme=ui.theme==='light'?'dark':'light';savePrefs();applyTheme();render();document.querySelector('[data-action="theme"]')?.focus();break;
     case 'segment': go('clients',{segment:id});break;
-    case 'task-filter': go('tasks',{taskWhen:id});break;
-    case 'status': ui.taskStatus=id;ui.taskWhen='';ui.taskLimit=15;render();document.querySelector('[data-action="status"][aria-pressed="true"]')?.focus();break;
     case 'more-clients': ui.clientLimit+=12;render();break;
-    case 'more-tasks': ui.taskLimit+=15;render();break;
-    case 'more-deals': ui.dealLimit+=12;render();break;
-    case 'switch-board': ui.pipelineView=ui.pipelineView==='board'?'list':'board';savePrefs();render();break;
-    case 'stage-list': ui.pipelineView='list';ui.stage=id;ui.dealLimit=12;savePrefs();render();break;
-    case 'open-pipeline': go('pipeline',{stage:id,owner:'',dealWindow:element.dataset.window||''});break;
-    case 'clear-deal-window': ui.dealWindow='';render();break;
-    case 'pipeline-branch': ui.branch=id;savePrefs();go('pipeline',{owner:''});break;
-    case 'deal-stage': ui.stage=id;ui.dealWindow='';ui.dealLimit=12;render();document.querySelector('[data-action="deal-stage"][aria-pressed="true"]')?.focus();break;
-    case 'new-deal': dealModal('',id);break;
-    case 'edit-deal': dealModal(id);break;
-    case 'deal-next': {
-      const deal=state.opportunities.find(item=>item.id===id);
-      if(deal)dealModal(id,'',deal.stage==='booked'&&deal.visitDate>m.today()?'booked':stages[deal.stage].next);
-      break;
-    }
-    case 'open-branch': ui.branch=id;savePrefs();go('clients');break;
+    case 'money-working': ui.homeFilter='working';ui.homeReason='';render();document.getElementById('money-clients').scrollIntoView?.();break;
+    case 'money-reason': ui.homeReason=ui.homeReason===id?'':id;ui.homeFilter='all';ui.homeLimit=8;render();break;
+    case 'payment-log': paymentLog();break;
+    case 'money-ai': void analyzeMoney();break;
+    case 'confirm-payment': confirmPayment(id);break;
     case 'profile': profileModal();break;
     case 'switch-profile': {
       if(serverMode||!m.byPerson(id,rawState))break;
-      contactDrafts.clear();ui.profile=id;ui.branch='';useSnapshot(rawState);savePrefs();closeModal();go(manager()?'analytics':'home');break;
+      contactDrafts.clear();ui.profile=id;ui.branch='';useSnapshot(rawState);savePrefs();closeModal();go(manager()?'home':'contacts');break;
     }
     case 'logout': void logout();break;
     case 'client': clientModal(id);break;
     case 'new-task': taskModal('',id);break;
     case 'edit-task': taskModal(id);break;
-    case 'call': quickContact(id);break;
-    case 'quick-contact':
-    case 'desk-client': openContactDesk(id);break;
+    case 'desk-client': if(dialog.open)closeModal();openContactDesk(id);break;
     case 'desk-tab': selectDeskTab(id);break;
     case 'desk-move': moveDesk(id);break;
     case 'copy-desk-phone': void copyDeskPhone(id);break;
@@ -1192,14 +908,6 @@ document.addEventListener('click',event=>{
       break;
     case 'home-filter': ui.homeFilter=id;ui.homeLimit=8;render();break;
     case 'more-contacts': ui.homeLimit+=8;render();break;
-    case 'new-booking': dealModal('','','booked');break;
-    case 'visit-pay': dealModal(id,'','paid');break;
-    case 'visit-missed': dealModal(id,'','lost');break;
-    case 'week-next': ui.visitWeek++;ui.visitDay='';render();break;
-    case 'week-prev': ui.visitWeek--;ui.visitDay='';render();break;
-    case 'week-current': ui.visitWeek=0;ui.visitDay='';render();break;
-    case 'visit-day': ui.visitDay=ui.visitDay===id?'':id;render();break;
-    case 'work-pipeline': go('pipeline',{stage:id});break;
     case 'close': closeModal();break;
     case 'pick-file': document.getElementById('import-file')?.click();break;
     case 'commit-import': void commitImport();break;
@@ -1215,7 +923,7 @@ document.addEventListener('keydown',event=>{
 document.addEventListener('input',event=>{
   rememberDeskField(event.target);
   if(event.target.id==='quick-query')updateQuickSearch();
-  if(event.target.dataset.filter==='query'){ui.query=event.target.value;ui.clientLimit=12;ui.taskLimit=15;ui.dealLimit=12;render(true);}
+  if(event.target.dataset.filter==='query'){ui.query=event.target.value;ui.clientLimit=12;render(true);}
 });
 document.addEventListener('change',event=>{
   const field=event.target;
@@ -1241,26 +949,18 @@ document.addEventListener('change',event=>{
       batchPreview();
     }
     if(field.name==='status'||field.name==='result')toggleOutcome();
-    if(field.name==='stage')toggleDealFields();
-    if(field.name==='clientId'&&['task-form','deal-form'].includes(field.form?.id)&&manager()){
+    if(field.dataset.filter==='period'&&modal.type==='payments'){ui.period=Number(field.value);render();paymentLog();return;}
+    if(field.name==='clientId'&&field.form?.id==='task-form'&&manager()){
       const client=m.byClient(state,field.value);
       const assignee=field.form.elements.assignee;
       if(!m.assignedBranches(m.byPerson(assignee.value)).includes(client?.branch))assignee.value=defaultAssignee(client?.branch)||'';
-    }
-    if(field.name==='clientId'&&modal.newBooking){
-      const booking=state.opportunities.find(deal=>deal.clientId===field.value&&isOpen(deal));
-      const client=m.byClient(state,field.value);
-      const elements=field.form.elements;
-      elements.service.value=booking?.service||client?.service||'';
-      elements.plannedInput.value=moneyInput(booking?.planned);
-      elements.assignee.value=booking?.assignee||mine()||defaultAssignee(client?.branch)||assignees()[0]?.id;
     }
     return;
   }
   const filter=field.dataset.filter;
   if(!filter||filter==='query')return;
   ui[filter]=filter==='period'?Number(field.value):field.value;
-  ui.clientLimit=12;ui.taskLimit=15;ui.dealLimit=12;
+  ui.clientLimit=12;
   if(filter==='fallback')updatePreview();
   if(filter==='branch')savePrefs();
   render(true);
@@ -1292,25 +992,16 @@ dialog.addEventListener('submit',async event=>{
   const current=modal;
   submit.disabled=true;
   try{
-    if(current.type==='deal'){
-      await run({type:'save-deal',values:{...data,id:current.id},mergeBooking:current.newBooking});
-      if(current.backToClient)clientModal(current.backToClient);
-      else closeModal();
-      notify(current.newBooking&&data.stage==='booked'?'Клиент записан':current.id?'Воронка обновлена':'Клиент добавлен в воронку');
-    }
     if(current.type==='task'){
-      await run({type:'save-task',task:{...data,id:current.id,appointment:data.appointment||'',service:data.service||''}});
+      await run({type:'save-task',task:{...data,id:current.id,appointment:current.appointment||'',service:current.service||''}});
       if(current.clientId)clientModal(current.clientId);
       else closeModal();
       notify(current.id?'Задача обновлена':'Задача создана');
     }
-    if(current.type==='contact'){
-      await run({type:'record-contact',clientId:current.id,taskId:current.taskId,values:data});
-      if(current.fromClient)clientModal(current.id);
-      else closeModal();
-      const message=data.result==='booked'?'Клиент записан':terminalResults.has(data.result)?'Результат сохранён':
-        'Следующий контакт: '+m.formatDate(data.followUp);
-      notify(message);
+    if(current.type==='payment'){
+      await run({type:'record-contact',clientId:current.id,values:data});
+      clientModal(current.id);
+      notify('Оплата подтверждена');
     }
     if(current.type==='reset'){
       await run({type:'reset-demo'});contactDrafts.clear();closeModal();go('home');notify('Демоданные восстановлены');
@@ -1336,9 +1027,11 @@ app.addEventListener('submit',event=>{
 applyTheme();
 try {
   if(serverMode){
-    account=(await repository.session()).user;
-    if(account){ui.profile=account.id;useSnapshot(await repository.read());if(!location.hash&&manager())ui.page='analytics';render();}
+    const session=await repository.session();
+    account=session.user;
+    aiAvailable=Boolean(session.ai);
+    if(account){ui.profile=account.id;useSnapshot(await repository.read());render();}
     else renderLogin();
-  }else{useSnapshot(await repository.read());if(!location.hash&&manager())ui.page='analytics';render();}
+  }else{useSnapshot(await repository.read());render();}
 }
 catch {app.innerHTML='<div class="boot" role="alert">Не удалось открыть хранилище. Проверьте разрешения браузера и перезагрузите страницу.</div>';}
