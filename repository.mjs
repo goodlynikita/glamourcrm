@@ -13,7 +13,7 @@ export class BrowserRepository {
   async dispatch(command){
     const update=async()=>{
       const state=await this.read();
-      const {next,value}=applyCommand(state,command);
+      const {next,value}=applyCommand(state,{...command,demoOnly:true});
       this.storage.setItem(storageKey,JSON.stringify(next));
       return {state:next,value};
     };
@@ -25,4 +25,22 @@ export class BrowserRepository {
 
 // The interface is read() and dispatch(command). An HTTP adapter can use the
 // same normalized model while translating Malakhit IDs and fields at its edge.
-export const repository=new BrowserRepository();
+export const runtime=documentOrNull()?.querySelector('meta[name="glamour-runtime"]')?.content||'browser';
+function documentOrNull(){return globalThis.document??null;}
+export const serverMode=runtime!=='browser';
+export const demoMode=runtime!=='server';
+async function api(path,values){
+  const request=values===undefined?{}:{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(values)};
+  const response=await fetch(new URL('api/'+path,location.href),request);
+  const data=await response.json();
+  if(!response.ok){
+    const error=new Error(data.error||'Запрос не выполнен.');
+    error.status=response.status;
+    throw error;
+  }
+  return data;
+}
+export const repository=serverMode?{
+  read:()=>api('state'),dispatch:command=>api('commands',command),session:()=>api('session'),
+  login:values=>api('login',values),logout:()=>api('logout',{})
+}:new BrowserRepository();
