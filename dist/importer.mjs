@@ -1,4 +1,6 @@
-import {branches, phoneKey, today, importKeys, isDuplicate, addImportKeys} from './model.mjs';
+import {branches,phoneKey,today,shiftDate} from './model.mjs';
+
+import {cleanImport,createImportIndex,importChanges} from './retention.mjs';
 
 const aliases = {
   name:['фио','ф и о','имя','имя клиента','клиент','фамилия имя','полное имя','name','full name','fullname','client name','client'],
@@ -7,11 +9,33 @@ const aliases = {
   lastVisit:['последний визит','дата последнего визита','дата последнего посещения','последнее посещение','last visit','lastvisit','last visit date'],
   registered:['дата регистрации','дата создания','регистрация','created','created at','registration date','registered'],
   service:['услуга','последняя услуга','service','last service'],
-  externalId:['id','id клиента','идентификатор','внешний id','external id','externalid','client id']
+  externalId:['id','id клиента','идентификатор','внешний id','external id','externalid','client id','код клиента'],
+  visitCount:['число визитов','количество визитов','визитов','visit count','visits'],
+  nextBooking:['следующая запись','дата следующей записи','будущая запись','next booking','next appointment'],
+  lastCancellation:['последняя отмена','дата отмены','дата последней отмены','last cancellation'],
+  cancelCount:['количество отмен','число отмен','отмен','cancellation count'],
+  cancellations:['история отмен','даты отмен','cancellation history']
 };
 const normalize = text=>String(text??'').toLowerCase().trim().replace(/ё/g,'е').replace(/[._-]+/g,' ').replace(/\s+/g,' ');
 const aliasesIndex=new Map(Object.entries(aliases).flatMap(([key,titles])=>titles.map(title=>[title,key])));
-export const sampleCsv='\uFEFFФИО;Телефон;Филиал;Дата последнего визита;Дата регистрации;Услуга\r\nМилана Снежина;+7 (000) 000-04-01;Центр;2026-07-15;2025-10-20;Маникюр\r\nЭльвира Ясенева;+7 (000) 000-04-02;Север;;2025-10-21;\r\n';
+export const fieldLabels={
+  name:'Имя клиента',phone:'Телефон',branch:'Филиал',externalId:'ID клиента',lastVisit:'Последний визит',
+  registered:'Дата регистрации',service:'Последняя услуга',visitCount:'Количество визитов',
+  nextBooking:'Следующая запись',lastCancellation:'Последняя отмена',cancelCount:'Количество отмен',cancellations:'История отмен'
+};
+const headers=['Имя клиента','Телефон','Филиал','ID клиента','Последний визит','Количество визитов','Следующая запись','Последняя отмена','Последняя услуга'];
+export function demoCsv(directory=branches,day=today()){
+  const at=index=>directory[index%directory.length].name;
+  const rows=[
+    ['Милана Снежина','+7 (000) 000-04-01',at(0),'demo-401',shiftDate(day,-95),1,'','','Маникюр'],
+    ['Эльвира Ясенева','+7 (000) 000-04-02',at(1),'demo-402',shiftDate(day,-84),5,'','','Педикюр'],
+    ['Таисия Ветрова','+7 (000) 000-04-03',at(2),'demo-403','',0,'',shiftDate(day,-6),''],
+    ['Лидия Солнечная','+7 (000) 000-04-04',at(1),'demo-404',shiftDate(day,-103),4,shiftDate(day,5),'','Маникюр']
+  ];
+  const escape=value=>'"'+String(value).replaceAll('"','""')+'"';
+  return '\uFEFF'+[headers,...rows].map(row=>row.map(escape).join(';')).join('\r\n')+'\r\n';
+}
+export const sampleCsv=demoCsv();
 
 function parseDelimited(text,delimiter){
   const rows=[];
@@ -105,44 +129,89 @@ export function parseDate(input,date1904=false){
   return null;
 }
 
-export function previewRows(rows,existing,fallback,options={}){
+export function detectColumns(rows){
   const headerIndex=rows.findIndex(row=>row.some(cell=>String(cell).trim()));
-  if(headerIndex<0) throw new Error('В файле нет данных.');
-  const fields={};
-  rows[headerIndex].forEach((cell,index)=>{
-    const key=aliasesIndex.get(normalize(cell));
-    if(key && fields[key]===undefined) fields[key]=index;
-  });
-  if(fields.name===undefined) throw new Error('В первой строке таблицы нужен столбец «ФИО».');
-  const records=[],issues=[];
-  let duplicates=0,hasRows=false;
-  const keys=importKeys(existing);
-  const day=today();
-  for(let i=headerIndex+1;i<rows.length;i++){
-    const row=rows[i];
-    if(!row.some(cell=>String(cell).trim())) continue;
-    hasRows=true;
-    const value=key=>row[fields[key]]??'';
-    const str=key=>String(value(key)).trim();
-    const branchInput=normalize(str('branch'));
-    const branch=branchInput?branches.find(item=>[item.id,item.name,item.label,...item.aliases].some(alias=>normalize(alias)===branchInput))?.id:fallback;
-    const phoneInput=str('phone');
-    const phone=phoneKey(phoneInput);
-    const name=str('name');
-    const lastVisit=parseDate(value('lastVisit'),options.date1904);
-    const registered=parseDate(value('registered'),options.date1904);
-    let reason='';
-    if(!name) reason='Пустое ФИО';
-    else if(!branches.some(item=>item.id===branch)) reason='Неизвестный филиал «'+str('branch')+'»';
-    else if(phoneInput&&!phone) reason='Проверьте номер телефона';
-    else if(lastVisit===null||lastVisit>day) reason='Проверьте дату последнего визита';
-    else if(registered===null||registered>day) reason='Проверьте дату регистрации';
-    if(reason){issues.push({row:i+1,reason});continue;}
-    const record={name,phone,branch,lastVisit,registered,service:str('service'),externalId:str('externalId')};
-    if(isDuplicate(keys,record)){duplicates++;continue;}
-    addImportKeys(keys,record);
-    records.push(record);
+  if(headerIndex<0)throw Error('В файле нет данных.');
+  const headers=rows[headerIndex].map(cell=>String(cell).trim());
+  const mapping={};
+  for(const [index,title] of headers.entries()){
+    const key=aliasesIndex.get(normalize(title));
+    if(key&&mapping[key]===undefined)mapping[key]=index;
   }
-  if(!hasRows) throw new Error('Добавьте хотя бы одну строку данных после заголовков.');
-  return {records,issues,duplicates};
+  return {headerIndex,headers,mapping};
+}
+
+export function previewRows(rows,existing,fallback,options={}){
+  const layout=detectColumns(rows);
+  const mapping=options.mapping??layout.mapping;
+  if(!Number.isInteger(mapping.name))throw Error('Сопоставьте столбец с именем клиента.');
+  const indexes=Object.values(mapping).filter(Number.isInteger);
+  if(new Set(indexes).size!==indexes.length)throw Error('Один столбец нельзя выбрать для нескольких полей.');
+  const directory=options.branches??branches;
+  const records=[],examples=[],issues=[],index=createImportIndex(existing),seen=new Set();
+  let duplicates=0,added=0,updated=0,hasRows=false;
+  const day=today();
+  for(let i=layout.headerIndex+1;i<rows.length;i++){
+    const row=rows[i];
+    if(!row.some(cell=>String(cell).trim()))continue;
+    hasRows=true;
+    const has=key=>Number.isInteger(mapping[key]);
+    const value=key=>row[mapping[key]]??'';
+    const str=key=>String(value(key)).trim();
+    try{
+      const branchInput=normalize(str('branch'));
+      const matches=branchInput?directory.filter(item=>
+        [item.id,item.name,item.label,...item.aliases].some(alias=>normalize(alias)===branchInput)):[];
+      if(matches.length>1)throw Error('Неоднозначный филиал «'+str('branch')+'».');
+      const branch=branchInput?matches[0]?.id:fallback;
+      if(!branch)throw Error('Неизвестный филиал «'+str('branch')+'».');
+      const item={name:str('name'),branch};
+      if(!item.name)throw Error('Пустое имя клиента.');
+      for(const key of ['phone','service','externalId'])if(has(key))item[key]=str(key);
+      if(item.phone){
+        const phone=phoneKey(item.phone);
+        if(!phone)throw Error('Проверьте номер телефона.');
+        item.phone=phone;
+      }
+      for(const key of ['lastVisit','registered','nextBooking','lastCancellation']){
+        if(!has(key))continue;
+        const date=parseDate(value(key),options.date1904);
+        if(date===null||(key!=='nextBooking'&&date>day))throw Error('Проверьте дату в поле «'+fieldLabels[key]+'».');
+        item[key]=date;
+      }
+      for(const key of ['visitCount','cancelCount']){
+        if(!has(key))continue;
+        const raw=str(key);
+        if(raw&&!/^\d+$/.test(raw))throw Error('Проверьте поле «'+fieldLabels[key]+'».');
+        item[key]=raw?Number(raw):null;
+      }
+      if(has('cancellations')){
+        item.cancellations=str('cancellations').split(/[|;,\n]+/).map(piece=>piece.trim()).filter(Boolean)
+          .map(piece=>parseDate(piece,options.date1904));
+      }
+      const record=cleanImport(item,directory,day,options);
+      const match=index.find(record);
+      if(match.error)throw Error(match.error);
+      if(match.client){
+        if(seen.has(match.client.id)){duplicates++;continue;}
+        const changes=importChanges(match.client,record);
+        if(!Object.keys(changes).length){duplicates++;continue;}
+        seen.add(match.client.id);
+        updated++;
+        const after={...match.client,...changes};
+        index.remove(match.client);
+        index.add(after);
+        examples.push({...after,operation:'Обновить'});
+      }else{
+        added++;
+        const entry={...record,id:'preview:'+i};
+        seen.add(entry.id);
+        index.add(entry);
+        examples.push({...entry,operation:'Добавить'});
+      }
+      records.push(record);
+    }catch(error){issues.push({row:i+1,reason:error.message});}
+  }
+  if(!hasRows)throw Error('Добавьте хотя бы одну строку данных после заголовков.');
+  return {records,examples,issues,duplicates,added,updated};
 }

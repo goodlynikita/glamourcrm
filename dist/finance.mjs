@@ -81,6 +81,7 @@ export function writeDeal(state,values,{client,assigneeExists,day,newId}){
     id:old?.id||newId(),clientId:client.id,assignee:values.assignee,stage,
     service:String(values.service??'').trim(),note:String(values.note??'').trim(),planned,actual,
     due,visitDate,visitTime,paymentDate,reason,created:old?.created||day,updated:day,
+    confirmedAt:old?.confirmedAt||(stage==='booked'?day:''),
     bookingRef:old?.bookingRef||'',resumeStage:old?.resumeStage||'',resumeDue:old?.resumeDue||''
   };
   if(old)state.opportunities[state.opportunities.indexOf(old)]=deal;
@@ -97,7 +98,7 @@ export function syncBooking(state,booking,{reference,clientId,day,newId}){
   if(!validTime(booking.visitTime))throw new Error('Проверьте время записи.');
   const deal=linked||state.opportunities.find(item=>item.clientId===clientId&&isOpen(item));
   const items={
-    stage:'booked',visitDate:booking.appointment,visitTime:booking.visitTime||'',updated:day,bookingRef:reference,due:'',
+    stage:'booked',visitDate:booking.appointment,visitTime:booking.visitTime||'',confirmedAt:deal?.confirmedAt||day,updated:day,bookingRef:reference,due:'',
     resumeStage:(deal?.stage==='booked'?deal.resumeStage:deal?.stage)||'',
     resumeDue:(deal?.stage==='booked'?deal.resumeDue:deal?.due)||'',
     assignee:booking.assignee,service:booking.service||deal?.service||'',

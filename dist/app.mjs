@@ -1,7 +1,8 @@
+import {priorities,reasons,rulesFields,segmentKeys,terminalResults} from './retention.mjs';
 import {icon} from './icons.mjs';
 import * as m from './model.mjs';
-import {readFile,previewRows,sampleCsv} from './importer.mjs';
-import {repository,storageKey} from './repository.mjs';
+import {readFile,previewRows,demoCsv,detectColumns,fieldLabels} from './importer.mjs';
+import {repository,storageKey,serverMode,demoMode} from './repository.mjs';
 import {actionDate,financeReport,isOpen,money,moneyInput,nextStep,selectDeals,stages} from './finance.mjs';
 
 const app=document.querySelector('#app');
@@ -12,26 +13,31 @@ let savedPrefs={};
 try {savedPrefs=JSON.parse(localStorage.getItem(preferencesKey)||'{}');} catch {}
 const routes={
   home:['Рабочий стол','grid'],clients:['Клиенты','users'],tasks:['Задачи','checkList'],
-  pipeline:['Воронка','funnel'],visits:['Записи','calendar'],branches:['Филиалы','building'],analytics:['Панель руководителя','chart'],import:['Импорт данных','upload']
+  pipeline:['Воронка','funnel'],visits:['Записи','calendar'],branches:['Филиалы','building'],analytics:['Панель руководителя','chart'],import:['Импорт данных','upload'],settings:['Настройки','checkList']
 };
 const pageFromHash=()=>Object.hasOwn(routes,location.hash.slice(1))?location.hash.slice(1):'home';
 const ui={
-  page:pageFromHash(),theme:savedPrefs.theme==='dark'?'dark':'light',profile:m.byPerson(savedPrefs.profile)?.id||'alina',
-  branch:m.byBranch(savedPrefs.branch)?.id||'',query:'',segment:'',taskStatus:'open',taskWhen:'',owner:'mine',
-  homeFilter:'ready',homeLimit:8,visitWeek:0,visitDay:'',pipelineView:savedPrefs.pipelineView==='list'?'list':'board',
-  clientSort:'attention',period:30,stage:'open',dealWindow:'',dealLimit:12,mobileNav:false,importFile:null,importPreview:null,importError:'',
+  page:pageFromHash(),theme:savedPrefs.theme==='dark'?'dark':'light',profile:m.byPerson(savedPrefs.profile)?.id||'manager',
+  branch:m.byBranch(savedPrefs.branch)?.id||'',query:'',segment:'',taskStatus:'open',taskWhen:'',taskPriority:'',owner:'mine',
+  homeFilter:'ready',homeReason:'',homeLimit:8,visitWeek:0,visitDay:'',pipelineView:savedPrefs.pipelineView==='list'?'list':'board',
+  clientSort:'attention',period:30,reportReason:'',stage:'open',dealWindow:'',dealLimit:12,mobileNav:false,importFile:null,importLayout:null,importMapping:null,importPreview:null,importError:'',
   importBusy:false,fallback:m.byBranch(savedPrefs.branch)?.id||'center',clientLimit:12,taskLimit:15
 };
-let state, modal, toastTimer;
+let state, rawState, account, modal, toastTimer;
 const s=value=>String(value??'').replace(/[&<>"']/g,ch=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'})[ch]);
 const attr=(name,value)=>' '+name+'="'+s(value)+'"';
 const cap=text=>text.charAt(0).toUpperCase()+text.slice(1);
-const person=()=>m.byPerson(ui.profile);
-const mine=()=>ui.profile==='manager'?'':ui.profile;
+const person=()=>serverMode?account:m.byPerson(ui.profile,rawState);
+const manager=()=>!person()?.branch;
+const managerPages=new Set(['analytics','import','settings']);
+const assignees=()=>m.people.filter(p=>p.branch&&(manager()||p.id===ui.profile));
+const defaultAssignee=branch=>assignees().find(p=>m.assignedBranches(p).includes(branch))?.id;
+const mine=()=>manager()?'':ui.profile;
 const opts=(items,value)=>items.map(([key,label])=>'<option value="'+s(key)+'"'+(key===value?' selected':'')+'>'+s(label)+'</option>').join('');
 const branchOpts=(current,all)=>opts([...(all?[['','Все филиалы']]:[]),...m.branches.map(b=>[b.id,b.label])],current);
 const tag=(label,tone)=>'<span class="tag '+tone+'"><span></span>'+s(label)+'</span>';
 const badge=(key,list=m.statuses)=>tag(list[key].label,list[key].tone);
+const reasonTitle=key=>reasons[key||'manual']?.label||reasons.manual.label;
 const iconBox=(name,tone)=>'<span class="icon-box '+tone+'">'+icon(name,19)+'</span>';
 const logo='<img src="./assets/mark.svg" width="36" height="36" alt="">';
 const tones=['berry','pink','stone','mint','peach'];
@@ -54,17 +60,40 @@ function notify(message,error=false){
   clearTimeout(toastTimer);
   toastTimer=setTimeout(()=>toastEl.replaceChildren(),4200);
 }
+function useSnapshot(snapshot){
+  rawState=m.upgradeState(snapshot);
+  if(serverMode)account=m.byPerson(ui.profile,rawState.settings?rawState:undefined)||account;
+  if(!serverMode&&person()?.branch){
+    const owned=m.assignedBranches(person());
+    const clients=rawState.clients.filter(client=>owned.includes(client.branch));
+    const ids=new Set(clients.map(client=>client.id));
+    const settings=m.settingsFor(rawState);
+    state={...rawState,clients,tasks:rawState.tasks.filter(task=>ids.has(task.clientId)),
+      opportunities:rawState.opportunities.filter(deal=>ids.has(deal.clientId)),imports:[],
+      settings:{...settings,branches:settings.branches.filter(branch=>owned.includes(branch.id)),
+        users:settings.users.filter(user=>m.assignedBranches(user).some(branch=>owned.includes(branch)))}};
+  }else state=rawState;
+  m.bindDirectory(state);
+  if(ui.branch&&!m.byBranch(ui.branch))ui.branch='';
+  if(!m.byBranch(ui.fallback))ui.fallback=m.branches[0]?.id||'';
+}
 async function run(command){
-  const response=await repository.dispatch(command);
-  state=response.state;
-  render();
-  return response.value;
+  try{
+    const response=await repository.dispatch({...command,actor:ui.profile});
+    useSnapshot(response.state);
+    render();
+    return response.value;
+  }catch(error){
+    if(serverMode&&error.status===401){account=null;closeModal();renderLogin('Сессия завершилась. Войдите снова.');}
+    throw error;
+  }
 }
 function resetNav(){
-  ui.query='';ui.segment='';ui.taskStatus='open';ui.taskWhen='';ui.owner='mine';ui.clientSort='attention';
-  ui.clientLimit=12;ui.taskLimit=15;ui.dealLimit=12;ui.stage='open';ui.dealWindow='';ui.homeFilter='ready';ui.homeLimit=8;ui.visitWeek=0;ui.visitDay='';ui.mobileNav=false;
+  ui.query='';ui.segment='';ui.taskStatus='open';ui.taskWhen='';ui.taskPriority='';ui.owner='mine';ui.clientSort='attention';
+  ui.clientLimit=12;ui.taskLimit=15;ui.dealLimit=12;ui.stage='open';ui.dealWindow='';ui.homeFilter='ready';ui.homeReason='';ui.homeLimit=8;ui.visitWeek=0;ui.visitDay='';ui.mobileNav=false;
 }
 function go(page,filters={}){
+  if(managerPages.has(page)&&!manager())page='home';
   resetNav();
   Object.assign(ui,filters,{page});
   if(location.hash!=='#'+page) history.pushState(null,'','#'+page);
@@ -76,7 +105,7 @@ window.addEventListener('popstate',()=>{
 });
 window.addEventListener('storage',async event=>{
   if(event.key===storageKey){
-    try {state=await repository.read();if(!dialog.open)render();}
+    try {useSnapshot(await repository.read());if(!dialog.open)render();}
     catch {notify('Обновлённые данные не удалось прочитать.',true);}
   }
 });
@@ -93,8 +122,10 @@ function shell(contents){
   return '<div class="layout"><aside class="sidebar'+(ui.mobileNav?' mobile-open':'')+'"><a href="#home" class="brand" data-action="navigate" data-id="home">'+logo+'<span><strong>GLAMOUR</strong><small>САЛОННАЯ CRM</small></span></a>'+
     '<div class="workspace"><span class="workspace-logo">'+icon('building',18)+'</span><span><strong>Сеть салонов</strong><small>GLAMOUR · Ижевск</small></span></div>'+
     '<nav aria-label="Разделы"><p class="nav-caption">РАБОЧЕЕ ПРОСТРАНСТВО</p>'+navEntry('home')+navEntry('clients')+navEntry('tasks',taskCount)+navEntry('pipeline')+navEntry('visits')+navEntry('branches')+
-    '<p class="nav-caption tools-caption">УПРАВЛЕНИЕ</p>'+navEntry('analytics')+navEntry('import')+'</nav>'+
-    '<div class="sidebar-foot"><div class="demo"><span></span> Деморежим</div><button class="profile" type="button" data-action="profile" aria-label="Сменить демопрофиль">'+avatar(p.name,p.id==='manager'?1:0)+'<span class="profile-text"><strong>'+s(p.name)+'</strong><small>'+s(p.role)+'</small></span>'+icon('chevron',16)+'</button></div></aside>'+
+    (manager()?'<p class="nav-caption tools-caption">УПРАВЛЕНИЕ</p>'+navEntry('analytics')+navEntry('import')+navEntry('settings'):'')+'</nav>'+
+    '<div class="sidebar-foot">'+(demoMode?'<div class="demo"><span></span> Деморежим</div>':'')+
+    '<button class="profile" type="button" data-action="profile" aria-label="'+(serverMode?'Мой аккаунт':'Сменить демопрофиль')+'">'+avatar(p.name,manager()?1:0)+
+    '<span class="profile-text"><strong>'+s(p.name)+'</strong><small>'+s(p.role)+'</small></span>'+icon('chevron',16)+'</button></div></aside>'+
     (ui.mobileNav?'<button type="button" class="scrim" data-action="nav-toggle" aria-label="Закрыть меню"></button>':'')+
     '<div class="workarea"><header class="topbar"><div class="breadcrumb"><button type="button" class="icon-button menu-button" data-action="nav-toggle" aria-label="Открыть меню">'+icon('menu')+'</button><span class="breadcrumb-root">GLAMOUR CRM</span>'+icon('right',13)+'<strong>'+routes[ui.page][0]+'</strong></div><div class="top-actions">'+
     '<button type="button" class="global-search" data-action="quick-search" aria-label="Поиск клиента">'+icon('search',17)+'<span>Поиск клиента</span><kbd>Ctrl K</kbd></button>'+
@@ -121,16 +152,15 @@ function taskTable(tasks){
   if(!tasks.length)return empty('Задач по этим условиям нет','Измените фильтры или назначьте новую задачу.','checkList');
   const rows=tasks.map(task=>{
     const client=m.byClient(state,task.clientId);
-    return '<tr><td><button type="button" class="identity" data-action="client" data-id="'+s(client.id)+'">'+clientAvatar(client)+'<span><strong>'+s(client.name)+'</strong><small>'+s(m.formatPhone(client.phone))+'</small></span></button></td><td><button type="button" class="task-title" data-action="edit-task" data-id="'+s(task.id)+'">'+s(task.title)+'</button></td>'+
+    return '<tr><td><button type="button" class="identity" data-action="client" data-id="'+s(client.id)+'">'+clientAvatar(client)+'<span><strong>'+s(client.name)+'</strong><small>'+s(m.formatPhone(client.phone))+' · '+s(m.byBranch(client.branch).name)+'</small></span></button></td><td><button type="button" class="task-title" data-action="edit-task" data-id="'+s(task.id)+'">'+s(task.title)+'</button><small class="cell-note">'+s(reasonTitle(task.reason))+'</small></td>'+
       '<td>'+s(m.byPerson(task.assignee)?.name||'—')+'</td>'+
-      '<td class="nowrap">'+due(task)+'</td><td>'+badge(task.status)+(task.result?'<small class="cell-note">'+s(m.outcomes[task.result])+'</small>':'')+'</td><td class="row-end"><button class="row-button" type="button" data-action="edit-task" data-id="'+s(task.id)+'" aria-label="'+s('Открыть задачу '+task.title)+'">'+icon('right',16)+'</button></td></tr>';
+      '<td>'+badge(task.priority||'normal',priorities)+'</td><td class="nowrap">'+due(task)+displayDueTime(task)+'</td><td>'+badge(task.status)+(task.result?'<small class="cell-note">'+s(m.outcomes[task.result])+'</small>':'')+'</td><td class="row-end"><button class="row-button" type="button" data-action="edit-task" data-id="'+s(task.id)+'" aria-label="'+s('Открыть задачу '+task.title)+'">'+icon('right',16)+'</button></td></tr>';
   }).join('');
-  return '<div class="table-wrap"><table><thead><tr><th>Клиент</th><th>Задача</th>'+'<th>Ответственный</th>'+'<th>Срок</th><th>Статус</th><th aria-label="Действия"></th></tr></thead><tbody>'+rows+'</tbody></table></div>';
+  return '<div class="table-wrap"><table><thead><tr><th>Клиент</th><th>Задача</th>'+'<th>Ответственный</th>'+'<th>Приоритет</th><th>Срок</th><th>Статус</th><th aria-label="Действия"></th></tr></thead><tbody>'+rows+'</tbody></table></div>';
 }
-const categories=[
-  ['lost','90+ дней','var(--chart-berry)'],['attention','45–89 дней','var(--chart-rose)'],
-  ['unknown','Нет данных','var(--chart-pink)'],['active','До 45 дней','var(--chart-sage)']
-];
+const categoryOptions=keys=>keys.map(key=>[key,reasonTitle(key)]);
+const clientCategories=[...segmentKeys,'future','working','excluded','unknown','clear'];
+const displayDueTime=task=>task.dueTime?'<small class="cell-note">'+s(task.dueTime)+'</small>':'';
 function bookingWeek(){
   const day=m.today();
   const weekday=(new Date(day+'T12:00:00Z').getUTCDay()+6)%7;
@@ -151,17 +181,17 @@ function contactTable(rows){
     rows.map(row=>{
       const c=m.byClient(state,row.clientId);
       const summary=row.task?.title||nextStep(row.deal,m.today());
-      const gap=m.clientSegment(state,c);
+      const reason=row.task?.reason||m.retentionReason(state,c);
       return '<tr><td><button class="identity" type="button" data-action="client" data-id="'+s(c.id)+'">'+clientAvatar(c)+
-        '<span><strong>'+s(c.name)+'</strong><small>'+s(m.byBranch(c.branch).name)+(gap==='active'?'':' · '+s(m.segments[gap].label))+'</small></span></button></td>'+
-        '<td><span class="work-action">'+s(summary)+'</span><small class="cell-note">'+s(m.byPerson(row.assignee)?.name)+'</small></td>'+
-        '<td class="nowrap">'+contactTime(row.due)+'</td><td class="row-end">'+button('Результат','phone','secondary small','quick-contact',
+        '<span><strong>'+s(c.name)+'</strong><small>'+s(m.byBranch(c.branch).name)+' · '+s(m.formatPhone(c.phone))+'</small></span></button></td>'+
+        '<td><span class="work-action">'+s(summary)+'</span><small class="cell-note">'+s(reasonTitle(reason))+(row.task?.priority==='high'?' · высокий приоритет':'')+'</small></td>'+
+        '<td class="nowrap">'+contactTime(row.due)+displayDueTime(row.task||{})+'</td><td class="row-end">'+button('Результат','phone','secondary small','quick-contact',
           'data-id="'+s(c.id)+'" data-task="'+s(row.task?.id)+'" data-assignee="'+s(row.assignee)+'"')+'</td></tr>';
     }).join('')+'</tbody></table></div>';
 }
 function compactPipeline(){
   const incoming=selectDeals(state,{branch:ui.branch,assignee:mine(),stage:'open'});
-  const total=incoming.reduce((sum,item)=>sum+(item.planned??0),0);
+  const total=incoming.some(item=>item.planned!=null)?incoming.reduce((sum,item)=>sum+(item.planned??0),0):null;
   return '<section class="panel snapshot"><div class="panel-head"><div><h2>Воронка</h2><p>Сумма в работе</p></div>'+iconBox('funnel','pink')+'</div>'+
     '<div class="snapshot-total">'+s(money(total))+'<small>'+m.number(incoming.length)+' клиентов</small></div><div class="snapshot-stages">'+
     ['contact','interested','booked'].map(key=>{
@@ -212,7 +242,8 @@ function home(){
   const rows=m.contactQueue(state,{branch:ui.branch,assignee:mine()});
   const late=rows.filter(row=>row.due&&row.due<day);
   const ready=rows.filter(row=>row.due&&row.due<=day);
-  const contacts={ready,late,all:rows}[ui.homeFilter];
+  const contacts={ready,late,all:rows}[ui.homeFilter].filter(row=>!ui.homeReason||
+    (row.task?.reason||m.retentionReason(state,m.byClient(state,row.clientId)))===ui.homeReason);
   const bookings=branchBookings().filter(deal=>deal.visitDate>=day&&deal.visitDate<=m.shiftDate(day,6));
   const revenue=cashReport(ui.branch);
   const eligible=m.metrics(state,ui.branch).attention;
@@ -221,14 +252,16 @@ function home(){
     button('Новая задача','plus','primary','new-task'))+
     '<section class="stats work-stats" aria-label="Основные показатели">'+
     stat('Контакты к сроку',ready.length,late.length?'Просрочено: '+late.length:'На сегодня','phone','berry','home-filter','ready')+
-    stat('Требуют внимания',eligible,'45+ дней или неизвестен визит','target','pink','segment','focus')+
-    stat('Записи на 7 дней',bookings.length,bookings.length?money(bookings.reduce((sum,deal)=>sum+(deal.planned??0),0)):'Расписание','calendar','stone','navigate','visits')+
-    stat('Выручка',money(revenue.revenue),'Оплачено за '+ui.period+' дн.','wallet','mint','navigate','analytics')+'</section>'+
+    stat('Требуют внимания',eligible,'По правилам сегментации','target','pink','segment','focus')+
+    stat('Записи на 7 дней',bookings.length,bookings.some(deal=>deal.planned!=null)?money(bookings.reduce((sum,deal)=>sum+(deal.planned??0),0)):'Расписание','calendar','stone','navigate','visits')+
+    (manager()&&revenue.paidCount?stat('Выручка',money(revenue.revenue),'Оплачено за '+ui.period+' дн.','wallet','mint','navigate','analytics'):
+      stat('Задачи открыты',rows.length,'С назначенным контактом','checkList','mint','navigate','tasks'))+'</section>'+
     '<div class="dashboard-grid work-grid"><section class="panel queue-panel"><div class="panel-head"><div><h2>Очередь контактов</h2><p>'+(mine()?'Мои клиенты':'Вся команда')+'</p></div>'+
-    button('Назначить обзвон','plus','secondary small','batch')+'</div><div class="queue-tabs">'+
-    tabs([['ready','К сроку '+ready.length],['late','Просрочены '+late.length],['all','Все '+rows.length]],ui.homeFilter,'home-filter')+'</div>'+
+    (manager()?button('Назначить обзвон','plus','secondary small','batch'):'')+'</div><div class="queue-tabs queue-filters">'+
+    tabs([['ready','К сроку '+ready.length],['late','Просрочены '+late.length],['all','Все '+rows.length]],ui.homeFilter,'home-filter')+
+    filterSelect('homeReason','Причина задачи',[['','Все причины'],...categoryOptions([...segmentKeys,'followup','manual'])],ui.homeReason)+'</div>'+
     contactTable(contacts.slice(0,ui.homeLimit))+(contacts.length>ui.homeLimit?footerCount(contacts.length,ui.homeLimit,'more-contacts'):'')+'</section>'+compactPipeline()+'</div>'+
-    '<div class="dashboard-grid work-grid">'+revenueChart(ui.branch,ui.period)+upcomingPanel(bookings)+'</div>';
+    '<div class="dashboard-grid work-grid">'+(manager()&&revenue.paidCount?revenueChart(ui.branch,ui.period):'')+upcomingPanel(bookings)+'</div>';
 }
 
 function visitsPage(){
@@ -289,38 +322,42 @@ function footerCount(total,limit,action){
 }
 function clientsPage(){
   let list=state.clients.filter(c=>(!ui.branch||c.branch===ui.branch)&&m.matches(c,ui.query)
-    &&(!ui.segment||(ui.segment==='focus'?m.clientSegment(state,c)!=='active':m.clientSegment(state,c)===ui.segment)));
+    &&(!ui.segment||(ui.segment==='focus'?segmentKeys.includes(m.retentionReason(state,c)):
+      ui.segment==='working'?m.displayedReason(state,c)==='working':m.retentionReason(state,c)===ui.segment)));
   list=list.map(client=>({...client,...m.lastKnownVisit(state,client)}));
   list.sort((a,b)=>ui.clientSort==='name'?a.name.localeCompare(b.name,'ru'):
     (a.lastVisit||'9999').localeCompare(b.lastVisit||'9999')||a.name.localeCompare(b.name,'ru'));
   const items=list.slice(0,ui.clientLimit).map(c=>{
     const gap=c.lastVisit?m.dateDiff(m.today(),c.lastVisit):null;
     return '<tr><td><button class="identity" type="button" data-action="client" data-id="'+s(c.id)+'">'+clientAvatar(c)+'<span><strong>'+s(c.name)+'</strong><small>'+s(m.formatPhone(c.phone))+'</small></span></button></td>'+
-      '<td>'+s(m.byBranch(c.branch).name)+'</td><td>'+s(c.lastVisit?m.longDate(c.lastVisit):'Нет данных')+(gap!==null?'<small class="cell-note">'+m.number(gap)+' дн. назад</small>':'')+'</td><td>'+badge(m.clientSegment(state,c),m.segments)+'</td>'+
+      '<td>'+s(m.byBranch(c.branch).name)+'</td><td>'+s(c.lastVisit?m.longDate(c.lastVisit):'Нет данных')+(gap!==null?'<small class="cell-note">'+m.number(gap)+' дн. назад</small>':'')+'</td><td>'+badge(m.retentionReason(state,c),reasons)+
+      (m.displayedReason(state,c)==='working'?'<small class="cell-note">Уже в работе</small>':'')+'</td>'+
       '<td class="row-end"><button class="row-button" type="button" data-action="client" data-id="'+s(c.id)+'" aria-label="'+s('Открыть карточку '+c.name)+'">'+icon('right',16)+'</button></td></tr>';
   }).join('');
-  return heading('Клиенты','',button('Импорт данных','upload','primary','navigate','data-id="import"'))+
+  return heading('Клиенты','',manager()?button('Импорт данных','upload','secondary','navigate','data-id="import"')+
+    button('Назначить обзвон','plus','primary','batch'):'')+
     '<section class="panel"><div class="toolbar">'+searchInput('Поиск по имени или телефону')+
-    filterSelect('segment','Сегмент клиентов',[['','Все сегменты'],['focus','Требуют внимания'],...categories.map(([key,label])=>[key,label])],ui.segment)+
+    filterSelect('segment','Сегмент клиентов',[['','Все сегменты'],['focus','Требуют внимания'],...categoryOptions(clientCategories)],ui.segment)+
     filterSelect('clientSort','Порядок сортировки',[['attention','По давности визита'],['name','По имени']],ui.clientSort)+'</div>'+
     (list.length?'<div class="table-wrap"><table><thead><tr><th>Клиент</th><th>Филиал</th><th>Последний визит</th><th>Сегмент</th><th aria-label="Действия"></th></tr></thead><tbody>'+items+'</tbody></table></div>':
     empty('Клиенты не найдены','Попробуйте изменить поиск или фильтры.','users'))+footerCount(list.length,ui.clientLimit,'more-clients')+'</section>';
 }
 function tasksPage(){
   const assignee=ui.owner==='mine'?mine():ui.owner;
-  const list=m.queue(state,{branch:ui.branch,assignee,status:ui.taskStatus,when:ui.taskWhen,query:ui.query});
+  const list=m.queue(state,{branch:ui.branch,assignee,status:ui.taskStatus,when:ui.taskWhen,query:ui.query}).filter(task=>!ui.taskPriority||(task.priority||'normal')===ui.taskPriority);
   return heading('Задачи','',button('Новая задача','plus','primary','new-task'))+
     '<section class="panel"><div class="tab-wrap">'+tabs([['open','Открытые'],['new','К выполнению'],['progress','В работе'],['done','Выполненные'],['','Все']],ui.taskStatus,'status')+'</div><div class="toolbar">'+searchInput('Поиск по задаче или клиенту')+
     filterSelect('owner','Ответственный',[...(mine()?[['mine','Мои задачи']]:[['mine','Вся команда']]),...m.people.filter(p=>p.branch).map(p=>[p.id,p.name]),...(mine()?[['','Вся команда']]:[])],ui.owner)+
-    filterSelect('taskWhen','Срок задачи',[['','Любой срок'],['today','Сегодня'],['late','Просрочено']],ui.taskWhen)+'</div>'+
+    filterSelect('taskWhen','Срок задачи',[['','Любой срок'],['today','Сегодня'],['late','Просрочено']],ui.taskWhen)+
+    filterSelect('taskPriority','Приоритет',[['','Любой приоритет'],...Object.entries(priorities).map(([key,value])=>[key,value.label])],ui.taskPriority)+'</div>'+
     taskTable(list.slice(0,ui.taskLimit))+footerCount(list.length,ui.taskLimit,'more-tasks')+'</section>';
 }
 function branchesPage(){
   const list=m.branches.filter(b=>!ui.branch||b.id===ui.branch);
   return heading('Филиалы','')+'<div class="branch-grid">'+list.map(b=>{
     const data=m.metrics(state,b.id);
-    const admin=m.people.find(p=>p.branch===b.id);
-    return '<article class="panel branch-card"><div class="branch-head">'+iconBox('building',b.color==='pink'?'pink':'berry')+'<div><h2>'+s(b.name)+'</h2><p>'+s(b.label)+'</p></div></div><div class="branch-admin">'+avatar(admin.name,1)+'<div><strong>'+s(admin.name)+'</strong><small>Администратор</small></div></div><dl><div><dt>Клиенты</dt><dd>'+m.number(data.total)+'</dd></div><div><dt>Требуют внимания</dt><dd>'+m.number(data.attention)+'</dd></div><div><dt>Открытые задачи</dt><dd>'+m.number(data.open)+'</dd></div></dl>'+button('Клиенты филиала',null,'secondary','open-branch','data-id="'+b.id+'"')+'</article>';
+    const admin=m.people.find(p=>m.assignedBranches(p).includes(b.id));
+    return '<article class="panel branch-card"><div class="branch-head">'+iconBox('building',b.color==='pink'?'pink':'berry')+'<div><h2>'+s(b.name)+'</h2><p>'+s(b.label)+'</p></div></div><div class="branch-admin">'+(admin?avatar(admin.name,1)+'<div><strong>'+s(admin.name)+'</strong><small>Администратор</small></div>':'<span class="secondary-text">Администратор не назначен</span>')+'</div><dl><div><dt>Клиенты</dt><dd>'+m.number(data.total)+'</dd></div><div><dt>Требуют внимания</dt><dd>'+m.number(data.attention)+'</dd></div><div><dt>Открытые задачи</dt><dd>'+m.number(data.open)+'</dd></div></dl>'+button('Клиенты филиала',null,'secondary','open-branch','data-id="'+b.id+'"')+'</article>';
   }).join('')+'</div>';
 }
 function cashReport(branch='',assignee=''){
@@ -395,85 +432,155 @@ function dealTable(list){
         '<td class="row-end">'+button('Открыть',null,'secondary small','edit-deal','data-id="'+s(deal.id)+'"')+'</td></tr>';
     }).join('')+'</tbody></table></div>';
 }
-function valueDetail(count,label,missing){
-  return m.number(count)+' '+label+(missing?' · без суммы: '+m.number(missing):'');
+const reportFields={
+  detected:'Выявлено',issued:'Задач выдано',processed:'Клиентов обработано',connected:'Контакт состоялся',
+  interested:'Согласились записаться',booked:'Записи подтверждены',declined:'Отказались',overdue:'Просрочено',conversion:'Записи от контактов'
+};
+function reportTable(title,firstColumn,items,keys){
+  return '<section class="panel report-table"><div class="panel-head"><h2>'+s(title)+'</h2></div><div class="table-wrap"><table><thead><tr><th>'+s(firstColumn)+'</th>'+
+    keys.map(key=>'<th>'+s(reportFields[key])+'</th>').join('')+'</tr></thead><tbody>'+
+    items.map(([label,report])=>'<tr><td><strong>'+s(label)+'</strong></td>'+keys.map(key=>
+      '<td>'+s(key==='conversion'?(report.connected?Math.round(100*report.contactBooked/report.connected)+'%':'—'):
+        report[key]===null?'—':m.number(report[key]))+'</td>').join('')+'</tr>').join('')+'</tbody></table></div></section>';
 }
 function analyticsPage(){
-  const stats=m.metrics(state,ui.branch,ui.period);
+  const base={branch:ui.branch,days:ui.period,reason:ui.reportReason};
+  const report=m.retentionReport(state,base);
+  const cards=[
+    ['detected','Клиентов выявлено','target','berry','Сейчас в подходящих сегментах'],
+    ['issued','Задач выдано','checkList','stone','За выбранный период'],
+    ['processed','Клиентов обработано','users','pink','С зафиксированным результатом'],
+    ['connected','Контакт состоялся','phone','mint','Клиенты ответили'],
+    ['interested','Согласились записаться','repeat','pink','Согласие или подтверждённая запись'],
+    ['booked','Записи подтверждены','calendar','mint','Подтверждены вручную'],
+    ['declined','Отказались','users','stone','В том числе от следующих звонков'],
+    ['overdue','Задач просрочено','clock','berry','Открытые задачи со сроком в прошлом']
+  ];
+  const keys=['detected','issued','processed','connected','interested','booked','declined','overdue'];
+  const branches=m.branches.filter(item=>!ui.branch||ui.branch===item.id);
+  const personnel=m.people.filter(p=>p.branch&&(!ui.branch||m.assignedBranches(p).includes(ui.branch)));
   const cash=cashReport(ui.branch);
-  const list=m.branches.filter(b=>!ui.branch||b.id===ui.branch);
-  const people=m.people.filter(p=>p.branch&&(!ui.branch||p.branch===ui.branch));
-  const rows=selectDeals(state,{branch:ui.branch});
-  const instant=rows.filter(deal=>isOpen(deal)).slice(0,4);
-  const today=m.today();
-  const paidStart=m.shiftDate(today,1-ui.period);
-  const paidEnd=today;
-  const funnelStages=['contact','interested','booked','paid','lost'];
-  const rowsByStage=funnelStages.map(key=>[key,rows.filter(deal=>deal.stage===key&&(key!=='paid'||(deal.paymentDate>=paidStart&&deal.paymentDate<=paidEnd)))]);
-  const largest=Math.max(1,...rowsByStage.map(([,items])=>items.length));
-  const period='Последние '+ui.period+' дн.';
-  return heading('Панель руководителя','',
-    filterSelect('period','Период отчёта',[['7','Период · 7 дней'],['30','Период · 30 дней'],['90','Период · 90 дней']],String(ui.period)))+
-    '<div class="stats finance-stats">'+stat('Выручка по воронке',money(cash.revenue),period+' · оплат: '+cash.paidCount,'wallet','mint','open-pipeline','paid','revenue')+
-    stat('Ближайшие записи',money(cash.booked),'Следующие '+ui.period+' дн. · '+valueDetail(cash.bookedCount,'зап.',cash.bookedUnpriced),'calendar','pink','open-pipeline','booked','upcoming')+
-    stat('Потенциал до записи',money(cash.potential),valueDetail(cash.potentialCount,'активных',cash.potentialUnpriced),'target','berry','open-pipeline','open','prospects')+
-    stat('Средний чек',money(cash.average),period+' · по оплаченным визитам','chart','stone')+'</div>'+
-    '<div class="analytics-grid cash-grid"><section class="panel"><div class="panel-head"><div><h2>Воронка возврата</h2><p>Суммы по текущим этапам, оплаты за выбранный период</p></div>'+button('Вся воронка',null,'secondary small','open-pipeline','data-id="open"')+'</div><div class="funnel-rows">'+
-    rowsByStage.map(([key,items])=>{
-      const amount=items.reduce((sum,deal)=>sum+((key==='paid'?deal.actual:deal.planned)??0),0);
-      const missing=items.filter(deal=>(key==='paid'?deal.actual:deal.planned)===null).length;
-      return '<button class="funnel-row" data-action="open-pipeline" data-id="'+key+'" data-window="'+(key==='paid'?'revenue':'')+'" type="button"><span class="funnel-info"><strong>'+s(stages[key].label)+'</strong><small>'+valueDetail(items.length,'клиент.',missing)+'</small></span>'+
-        '<span class="funnel-track"><span class="funnel-fill '+stages[key].tone+'" style="--fill:'+Math.round(100*items.length/largest)+'%"></span></span><strong class="funnel-value">'+s(money(amount))+'</strong></button>';
-    }).join('')+'</div></section>'+
-    '<section class="panel"><div class="panel-head"><div><h2>Кому уделить внимание</h2><p>'+s(cash.overdue?'Просрочено шагов: '+m.number(cash.overdue):'Ближайшие шаги по клиентам')+'</p></div>'+iconBox('checkList','pink')+'</div><div class="priority-list">'+
-    (instant.length?instant.map(deal=>{
-      const c=m.byClient(state,deal.clientId);
-      return '<button class="priority-item" type="button" data-action="deal-next" data-id="'+s(deal.id)+'">'+clientAvatar(c)+'<span><strong>'+s(c.name)+'</strong><small>'+s(nextStep(deal,today))+' · '+s(actionDate(deal)?m.formatDate(actionDate(deal)):'без срока')+'</small></span><strong>'+s(money(deal.planned))+'</strong></button>';
-    }).join(''):empty('Все шаги выполнены','Новые действия появятся после добавления клиентов.','checkList'))+
-    '</div></section></div>'+
-    '<div class="analytics-grid cash-grid"><section class="panel"><div class="panel-head"><div><h2>Деньги по филиалам</h2><p>В рублях, по данным воронки</p></div>'+iconBox('building','berry')+'</div><div class="table-wrap"><table><thead><tr><th>Филиал</th><th>Оплачено</th><th>На записях</th><th>До записи</th></tr></thead><tbody>'+
-    list.map(b=>{const v=cashReport(b.id);return '<tr><td><button class="task-title" type="button" data-action="pipeline-branch" data-id="'+b.id+'">'+s(b.name)+'</button></td><td>'+s(money(v.revenue))+'</td><td>'+s(money(v.booked))+'</td><td>'+s(money(v.potential))+'</td></tr>';}).join('')+
-    '</tbody></table></div></section><section class="panel"><div class="panel-head"><div><h2>Работа команды</h2><p>Оплаты и задачи · звонков '+m.number(stats.contacts)+'</p></div>'+iconBox('users','stone')+'</div><div class="team">'+
-    people.map((p,i)=>{const v=m.metrics(state,ui.branch,ui.period,today,p.id);const r=cashReport(ui.branch,p.id);return '<div class="team-member">'+avatar(p.name,i)+'<span><strong>'+s(p.name)+'</strong><small>Задач выполнено: '+v.completed+' · открыто: '+v.open+'</small></span><strong title="Оплачено">'+s(money(r.revenue))+'</strong></div>';}).join('')+
-    '</div></section></div><div class="analytics-trend">'+revenueChart(ui.branch,ui.period)+'</div>';
+  return heading('Панель руководителя','',filterSelect('reportReason','Категория задач',[['','Все категории'],...segmentKeys.map(key=>[key,reasonTitle(key)])],ui.reportReason)+
+    filterSelect('period','Период отчёта',[['7','7 дней'],['30','30 дней'],['90','90 дней']],String(ui.period)))+
+    '<div class="stats finance-stats">'+cards.map(([key,label,ic,tone,detail])=>
+      stat(label,report[key],detail,ic,tone,key==='detected'?'segment':key==='overdue'?'task-filter':'',key==='detected'?(ui.reportReason||'focus'):'late')).join('')+'</div>'+
+    reportTable('Результаты по филиалам','Филиал',branches.map(branch=>[branch.name,m.retentionReport(state,{...base,branch:branch.id})]),keys)+
+    reportTable('Работа администраторов','Администратор',personnel.map(p=>[p.name,m.retentionReport(state,{...base,assignee:p.id})]),[...keys.slice(1),'conversion'])+
+    reportTable('Результаты по категориям','Причина',segmentKeys.map(reason=>[reasonTitle(reason),m.retentionReport(state,{...base,reason})]),keys)+
+    (!ui.reportReason&&cash.paidCount?'<div class="analytics-trend">'+revenueChart(ui.branch,ui.period)+'</div>':'');
+}
+function settingsPage(){
+  const cfg=m.settingsFor(state);
+  return heading('Настройки','')+'<form id="settings-form" class="settings-grid">'+
+    '<section class="panel"><div class="panel-head"><h2>Сегментация и задачи</h2></div><div class="modal-body form-grid">'+
+    Object.entries(rulesFields).map(([key,[label,,min,max]])=>field(label,input(key,cfg.rules[key],'number','required min="'+min+'" max="'+max+'"'))).join('')+
+    '</div></section><section class="panel"><div class="panel-head"><h2>Филиалы</h2></div><div class="modal-body form-grid">'+
+    cfg.branches.map(branch=>field(branch.label,input('branch-'+branch.id,branch.name,'text','required maxlength="80"'),'wide')).join('')+
+    field('Новый филиал',input('newBranch','','text','maxlength="80"'),'wide')+
+    '</div></section><section class="panel settings-users"><div class="panel-head"><h2>Пользователи и филиалы</h2></div><div class="modal-body">'+
+    cfg.users.map(user=>user.id!=='manager'?
+      '<fieldset class="user-settings"><legend>'+s(user.role)+' · '+s(user.id)+'</legend>'+
+      '<div class="form-grid">'+field('Имя',input('user-'+user.id,user.name,'text','required maxlength="120"'))+
+      field('Роль',select('role-'+user.id,[['admin','Администратор'],['manager','Руководитель']],user.branch?'admin':'manager',true))+'</div>'+
+      '<div class="branch-checks">'+cfg.branches.map(branch=>'<label><input type="checkbox" name="access-'+s(user.id)+'" value="'+s(branch.id)+'"'+
+        (m.assignedBranches(user).includes(branch.id)?' checked':'')+'>'+s(branch.name)+'</label>').join('')+'</div></fieldset>':
+      '<p class="secondary-text settings-manager">'+s(user.name)+' · '+s(user.role)+' · все филиалы</p>').join('')+
+    '</div></section><div class="settings-save"><p id="settings-error" class="form-error" role="alert" hidden></p>'+
+    '<button type="submit" class="button primary">'+icon('check',17)+'Сохранить настройки</button>'+
+    (demoMode?button('Сбросить демоданные',null,'secondary','reset-demo'):'')+'</div></form>';
+}
+function renderLogin(error=''){
+  document.title='GLAMOUR CRM — Вход';
+  app.innerHTML='<main class="login-page"><form id="login-form" class="panel login-card"><div class="panel-head"><div>'+logo+
+    '<h1>Вход в GLAMOUR CRM</h1></div></div><div class="modal-body form-grid">'+
+    field('Логин',input('user','','text','required autocomplete="username" autofocus'),'wide')+
+    field('Пароль',input('password','','password','required autocomplete="current-password"'),'wide')+
+    (demoMode?'<p class="secondary-text wide">Руководитель: manager. Администраторы: alina, maria, sofia. Пароль демо: glamour-demo.</p>':'')+
+    '<p id="login-error" class="form-error wide" role="alert"'+(error?'':' hidden')+'>'+s(error)+'</p>'+
+    '<button type="submit" class="button primary wide">Войти</button></div></form></main>';
+}
+async function logout(){
+  try{await repository.logout();account=null;closeModal();renderLogin();}
+  catch(error){notify(error.message,true);}
+}
+async function submitMain(event){
+  const form=event.target;
+  if(!['login-form','settings-form'].includes(form.id))return;
+  event.preventDefault();
+  const data=new FormData(form);
+  const submit=form.querySelector('[type="submit"]');
+  submit.disabled=true;
+  try{
+    if(form.id==='login-form'){
+      const login=await repository.login(Object.fromEntries(data));
+      account=login.user;
+      ui.profile=account.id;
+      ui.branch='';
+      useSnapshot(await repository.read());
+      go(manager()?'analytics':'home');
+    }else{
+      const cfg=m.settingsFor(state);
+      const rules=Object.fromEntries(Object.keys(rulesFields).map(key=>[key,data.get(key)]));
+      const branches=Object.fromEntries(cfg.branches.map(branch=>[branch.id,data.get('branch-'+branch.id)]));
+      const users=Object.fromEntries(cfg.users.filter(user=>user.id!=='manager').map(user=>
+        [user.id,{name:data.get('user-'+user.id),role:data.get('role-'+user.id),branches:data.getAll('access-'+user.id)}]));
+      await run({type:'save-settings',values:{rules,branches,users,newBranch:data.get('newBranch')}});
+      notify('Настройки сохранены');
+    }
+  }catch(error){
+    const message=form.querySelector('.form-error');
+    message.textContent=error.message;
+    message.hidden=false;
+    submit.disabled=false;
+  }
+}
+
+function mappingPanel(){
+  const layout=ui.importLayout;
+  if(!layout)return '';
+  return '<details class="panel mapping-panel" '+(!Number.isInteger(ui.importMapping.name)?'open':'')+'><summary>Сопоставление столбцов</summary>'+
+    '<div class="mapping-grid">'+Object.entries(fieldLabels).map(([key,label])=>field(label,
+      '<span class="select-control"><select id="mapping-'+key+'" data-map="'+key+'">'+
+      opts([['','Выберите столбец'],...layout.headers.map((header,index)=>[String(index),header||'Столбец '+(index+1)])],String(ui.importMapping[key]??''))+
+      icon('chevron',15)+'</span>')).join('')+'</div></details>';
 }
 function importPage(){
   const file=ui.importFile;
   const result=ui.importPreview;
-  const error=ui.importError;
-  const previews=result?.records.slice(0,8)??[];
   let preview='';
   if(result){
+    const examples=result.examples.slice(0,8);
     preview='<section class="panel import-preview"><div class="panel-head"><div><h2>Предпросмотр импорта</h2><p>'+s(file.name)+(file.sheet?' · Лист «'+s(file.sheet)+'»':'')+'</p></div></div><div class="import-counters">'+
-      tag(m.number(result.records.length)+' к добавлению','green')+tag(m.number(result.duplicates)+' дублей','slate')+tag(m.number(result.issues.length)+' с ошибками',result.issues.length?'red':'slate')+'</div>'+
-      (previews.length?'<div class="table-wrap"><table><thead><tr><th>Клиент</th><th>Филиал</th><th>Последний визит</th><th>Дата регистрации</th></tr></thead><tbody>'+
-      previews.map(c=>'<tr><td><strong>'+s(c.name)+'</strong><small class="cell-note">'+s(m.formatPhone(c.phone))+'</small></td><td>'+s(m.byBranch(c.branch).name)+'</td><td>'+s(c.lastVisit?m.longDate(c.lastVisit):'Нет данных')+'</td><td>'+s(m.longDate(c.registered))+'</td></tr>').join('')+
-      '</tbody></table></div>':empty('Готовых к добавлению строк нет','Проверьте содержимое файла.','file'))+
+      tag(m.number(result.added)+' новых','green')+tag(m.number(result.updated)+' к обновлению','berry')+
+      tag(m.number(result.duplicates)+' без изменений или дублей','slate')+tag(m.number(result.issues.length)+' с ошибками',result.issues.length?'red':'slate')+'</div>'+
+      (examples.length?'<div class="table-wrap"><table><thead><tr><th>Клиент</th><th>Филиал</th><th>Последний визит</th><th>Визитов</th><th>Действие</th></tr></thead><tbody>'+
+      examples.map(c=>'<tr><td><strong>'+s(c.name)+'</strong><small class="cell-note">'+s(m.formatPhone(c.phone))+'</small></td><td>'+s(m.byBranch(c.branch).name)+
+        '</td><td>'+s(c.lastVisit?m.longDate(c.lastVisit):'Нет данных')+'</td><td>'+s(c.visitCount??'—')+'</td><td>'+s(c.operation)+'</td></tr>').join('')+
+      '</tbody></table></div>':empty('Новых данных для сохранения нет','','file'))+
       (result.issues.length?'<details class="import-issues" open><summary>Ошибки в строках</summary><ul>'+result.issues.slice(0,20).map(issue=>'<li>Строка '+issue.row+' · '+s(issue.reason)+'</li>').join('')+'</ul>'+
       (result.issues.length>20?'<p>Показано 20 из '+result.issues.length+' ошибок.</p>':'')+'</details>':'')+
-      '<div class="table-footer"><span>'+(result.records.length>8?'Предпросмотр первых 8 строк. ':'')+'Дубли и строки с ошибками пропускаются.</span>'+
-      button('Добавить клиентов','check','primary','commit-import',!result.records.length||ui.importBusy?'disabled':'')+'</div></section>';
+      '<div class="table-footer"><span>Ошибки и дубли пропускаются. История контактов сохраняется.</span>'+
+      button('Сохранить базу','check','primary','commit-import',!result.records.length||ui.importBusy?'disabled':'')+'</div></section>';
   }
-  const history=state.imports;
-  return heading('Импорт данных','Добавьте вымышленных клиентов из Excel или CSV.',
-    button('Скачать шаблон CSV','download','secondary','template'))+
-    '<div class="import-grid"><section class="panel import-box"><div class="panel-head"><div><h2>Загрузка файла</h2><p>CSV, XLSX или XLS · до 15 МБ</p></div>'+iconBox('upload','berry')+'</div><div class="import-body">'+
+  return heading('Импорт данных','',button('Тестовый CSV','download','secondary','template'))+
+    '<section class="panel import-box"><div class="panel-head"><div><h2>Загрузка файла</h2><p>CSV, XLSX или XLS · до 15 МБ</p></div>'+iconBox('upload','berry')+'</div><div class="import-body">'+
+    (demoMode?'<div class="hint import-demo">Для демо используйте только вымышленные данные. Пример номера: +7 (000) 000-04-01.</div>':'')+
     '<div class="dropzone" id="dropzone"><input id="import-file" type="file" class="sr-only" accept=".csv,.xlsx,.xls" tabindex="-1">'+iconBox(file?'file':'upload','berry')+
     '<strong>'+s(file?.name||'Перетащите файл сюда')+'</strong><p>'+s(ui.importBusy?'Обработка файла…':'или выберите файл на устройстве')+'</p>'+
     button(file?'Заменить файл':'Выбрать файл',null,'secondary','pick-file',ui.importBusy?'disabled':'')+'</div>'+
     '<label class="field"><span>Филиал для строк без филиала</span><span class="select-control"><select id="fallback" data-filter="fallback">'+branchOpts(ui.fallback,false)+'</select>'+icon('chevron',15)+'</span></label>'+
-    (error?'<div role="alert" class="form-error">'+s(error)+'</div>':'')+'</div></section>'+
-    '<section class="panel import-guide"><div class="panel-head"><div><h2>Подготовка файла</h2><p>Первая строка содержит заголовки</p></div>'+iconBox('info','stone')+'</div><div class="import-body">'+
-    '<ul><li>Обязательный столбец — «ФИО».</li><li>Добавьте телефон, филиал, дату последнего визита, дату регистрации и услугу, если они известны.</li><li>Для дат используйте ДД.ММ.ГГГГ, ГГГГ-ММ-ДД или ячейки с датой Excel.</li><li>Дубли определяются по телефону или внешнему ID в пределах филиала.</li></ul>'+
-    '<div class="hint">'+icon('info',18)+'<span>Если дата последнего визита пуста, клиент попадёт в сегмент «Нет данных».</span></div></div></section></div>'+preview+
-    (history.length?'<section class="panel import-preview"><div class="panel-head"><div><h2>История импорта</h2><p>Последние загрузки</p></div></div><div class="table-wrap"><table><thead><tr><th>Файл</th><th>Дата</th><th>Добавлено</th></tr></thead><tbody>'+
-    history.slice(0,10).map(x=>'<tr><td>'+s(x.name)+'</td><td>'+s(m.longDate(x.date))+'</td><td>'+m.number(x.added)+'</td></tr>').join('')+'</tbody></table></div></section>':'');
+    (ui.importError?'<div role="alert" class="form-error">'+s(ui.importError)+'</div>':'')+'</div></section>'+
+    mappingPanel()+preview+
+    (state.imports.length?'<section class="panel import-preview"><div class="panel-head"><div><h2>История импорта</h2></div></div><div class="table-wrap"><table><thead><tr><th>Файл</th><th>Дата</th><th>Добавлено</th><th>Обновлено</th></tr></thead><tbody>'+
+    state.imports.slice(0,10).map(x=>'<tr><td>'+s(x.name)+'</td><td>'+s(m.longDate(x.date))+'</td><td>'+m.number(x.added)+'</td><td>'+m.number(x.updated??0)+'</td></tr>').join('')+'</tbody></table></div></section>':'');
 }
 
-const views={home,clients:clientsPage,tasks:tasksPage,pipeline:pipelinePage,visits:visitsPage,branches:branchesPage,analytics:analyticsPage,import:importPage};
+const views={home,clients:clientsPage,tasks:tasksPage,pipeline:pipelinePage,visits:visitsPage,branches:branchesPage,analytics:analyticsPage,import:importPage,settings:settingsPage};
 function render(preserveFocus=false){
   const focused=preserveFocus&&document.activeElement?.id;
   const caret=focused==='query'?document.activeElement.selectionStart:null;
+  if(serverMode&&!account){renderLogin();return;}
+  if(managerPages.has(ui.page)&&!manager())ui.page='home';
   app.innerHTML=shell(views[ui.page]());
   document.title='GLAMOUR CRM — '+routes[ui.page][0];
   if(focused){
@@ -501,8 +608,12 @@ function modalFoot(label,ic='check'){
   return '<div class="modal-foot">'+button('Отмена',null,'secondary','close')+'<button type="submit" class="button primary">'+icon(ic,17)+s(label)+'</button></div>';
 }
 function profileModal(){
-  present(modalHead('Демопрофиль','Выберите кабинет администратора или руководителя.')+'<div class="profile-list">'+m.people.map((p,index)=>
-    '<button type="button" data-action="switch-profile" data-id="'+p.id+'" class="profile-option">'+avatar(p.name,index)+'<span><strong>'+s(p.name)+'</strong><small>'+s(p.role)+(p.branch?' · '+s(m.byBranch(p.branch).name):' · Вся сеть')+'</small></span>'+(p.id===ui.profile?icon('check',20):'')+'</button>'
+  if(serverMode){
+    present(modalHead('Аккаунт',person().name)+'<div class="modal-body">'+button('Выйти',null,'secondary','logout')+'</div>','account');
+    return;
+  }
+  present(modalHead('Демопрофиль','Выберите кабинет администратора или руководителя.')+'<div class="profile-list">'+m.settingsFor(rawState).users.map((p,index)=>
+    '<button type="button" data-action="switch-profile" data-id="'+p.id+'" class="profile-option">'+avatar(p.name,index)+'<span><strong>'+s(p.name)+'</strong><small>'+s(p.role)+(p.branch?' · '+s(m.byBranch(p.branch,rawState)?.name||''):' · Вся сеть')+'</small></span>'+(p.id===ui.profile?icon('check',20):'')+'</button>'
   ).join('')+'</div>','profile');
 }
 function clientModal(id){
@@ -514,12 +625,15 @@ function clientModal(id){
   const clientDeals=selectDeals(state).filter(deal=>deal.clientId===id);
   const openDeal=clientDeals.find(isOpen);
   const appointments=clientDeals.filter(deal=>deal.stage==='booked'&&deal.visitDate>=m.today());
-  present(modalHead('Карточка клиента')+'<div class="drawer-body"><div class="client-profile">'+clientAvatar(c)+'<div><h3>'+s(c.name)+'</h3><p>'+s(m.byBranch(c.branch).label)+'</p></div>'+badge(m.clientSegment(state,c),m.segments)+'</div><div class="client-actions">'+
-    button('Зафиксировать звонок','phone','primary','call','data-id="'+s(id)+'"')+
-    button('Новая задача','plus','secondary','new-task','data-id="'+s(id)+'"')+
+  present(modalHead('Карточка клиента')+'<div class="drawer-body"><div class="client-profile">'+clientAvatar(c)+'<div><h3>'+s(c.name)+'</h3><p>'+s(m.byBranch(c.branch).label)+'</p></div>'+badge(m.retentionReason(state,c),reasons)+'</div><div class="client-actions">'+
+    (c.callBlocked||c.invalidPhone?'':button('Зафиксировать звонок','phone','primary','call','data-id="'+s(id)+'"')+
+    button('Новая задача','plus','secondary','new-task','data-id="'+s(id)+'"'))+
     (openDeal?button('Открыть воронку','funnel','secondary','edit-deal','data-id="'+s(openDeal.id)+'"'):
-      button('Добавить в воронку','funnel','secondary','new-deal','data-id="'+s(id)+'"'))+'</div>'+
-    '<dl class="client-facts"><div><dt>Телефон</dt><dd>'+s(m.formatPhone(c.phone))+'</dd></div><div><dt>Последний визит</dt><dd>'+s(last.lastVisit?m.longDate(last.lastVisit):'Нет данных')+'</dd></div><div><dt>Дата регистрации</dt><dd>'+s(m.longDate(c.registered))+'</dd></div><div><dt>Последняя услуга</dt><dd>'+s(last.lastVisit&&last.service?last.service:'—')+'</dd></div></dl>'+
+      c.callBlocked||c.invalidPhone?'':button('Добавить в воронку','funnel','secondary','new-deal','data-id="'+s(id)+'"'))+'</div>'+
+    '<dl class="client-facts"><div><dt>Телефон</dt><dd>'+s(m.formatPhone(c.phone))+'</dd></div><div><dt>Последний визит</dt><dd>'+s(last.lastVisit?m.longDate(last.lastVisit):'Нет данных')+'</dd></div><div><dt>Дата регистрации</dt><dd>'+s(m.longDate(c.registered))+'</dd></div><div><dt>Последняя услуга</dt><dd>'+s(last.service||'—')+'</dd></div><div><dt>Завершённых визитов по выгрузке</dt><dd>'+s(c.visitCount??'—')+'</dd></div>'+
+    '<div><dt>Следующая запись по выгрузке</dt><dd>'+s(m.longDate(c.nextBooking))+'</dd></div><div><dt>Последняя отмена</dt><dd>'+s(m.longDate(c.lastCancellation))+'</dd></div>'+
+    '<div><dt>Отмен по выгрузке</dt><dd>'+s(c.cancelCount??'—')+'</dd></div></dl>'+
+    (c.callBlocked||c.invalidPhone?'<div class="hint"><span>'+s(c.callBlocked?'Клиент просит больше не связываться.':'Телефон отмечен как неактуальный.')+'</span></div>':'')+
     (openDeal&&openDeal.stage!=='booked'?'<section class="drawer-section"><h3>Возврат клиента</h3><div class="drawer-line">'+iconBox('funnel','berry')+
       '<div><strong>'+s(stages[openDeal.stage].label)+'</strong><small>'+s(nextStep(openDeal,m.today()))+'</small></div><strong class="appointment-price">'+s(money(openDeal.planned))+'</strong></div></section>':'')+
     (appointments.length?'<section class="drawer-section"><h3>Предстоящие записи</h3>'+appointments.map(event=>'<div class="drawer-line">'+iconBox('calendar','mint')+'<div><strong>'+s(m.longDate(event.visitDate))+'</strong><small>'+s(event.service||'Повторный визит')+'</small></div><strong class="appointment-price">'+s(money(event.planned))+'</strong></div>').join('')+'</section>':'')+
@@ -541,60 +655,72 @@ function taskModal(id='',clientId=''){
   const client=m.byClient(state,task?.clientId||clientId);
   const available=state.clients.filter(c=>!ui.branch||c.branch===ui.branch||c.id===client?.id)
     .sort((a,b)=>a.name.localeCompare(b.name,'ru'));
-  const preferred=mine()||m.people.find(p=>p.branch===(client?.branch||ui.branch))?.id||m.people[0].id;
+  const preferred=mine()||defaultAssignee(client?.branch||ui.branch)||assignees()[0]?.id;
   const d=task??{clientId,title:'',assignee:preferred,due:m.today(),status:'new',note:''};
   present(modalHead(task?'Задача':'Новая задача',task?s(client.name):'Назначьте следующий контакт с клиентом.')+
     '<form id="task-form"><div class="modal-body form-grid">'+
-    field('Клиент',select('clientId',[['','Выберите клиента'],...available.map(c=>[c.id,c.name+' · '+m.byBranch(c.branch).name])],d.clientId,true),'wide')+
+    (task?'<input type="hidden" name="clientId" value="'+s(task.clientId)+'">':
+      field('Клиент',select('clientId',[['','Выберите клиента'],...available.filter(c=>!c.callBlocked&&!c.invalidPhone).map(c=>[c.id,c.name+' · '+m.byBranch(c.branch).name])],d.clientId,true),'wide'))+
     field('Название задачи',input('title',d.title,'text','required maxlength="140" placeholder="Например, предложить повторный визит" autofocus'),'wide')+
-    field('Ответственный',select('assignee',m.people.filter(p=>p.branch).map(p=>[p.id,p.name]),d.assignee,true))+
+    field('Ответственный',select('assignee',assignees().map(p=>[p.id,p.name]),d.assignee,true))+
     field('Срок выполнения',input('due',d.due,'date','required'))+
+    field('Время задачи',input('dueTime',d.dueTime||'','time'))+
+    field('Приоритет',select('priority',Object.entries(priorities).map(([key,value])=>[key,value.label]),d.priority||'normal',true))+
+    (task?'<p class="secondary-text wide">Причина: '+s(reasonTitle(task.reason))+'</p>':'')+
     field('Статус',select('status',Object.entries(m.statuses).map(([key,value])=>[key,value.label]),d.status,true),'wide')+
-    outcomeFields(d)+field('Комментарий','<textarea name="note" maxlength="1200" rows="3" placeholder="Детали для следующего контакта">'+s(d.note)+'</textarea>','wide')+
+    outcomeFields(d)+followUpFields()+field('Комментарий','<textarea name="note" maxlength="1200" rows="3" placeholder="Детали для следующего контакта">'+s(d.note)+'</textarea>','wide')+
+    (task?.activity?.length?'<details class="wide activity"><summary>История задачи</summary><ul>'+task.activity.slice().reverse().slice(0,20).map(event=>
+      '<li>'+s(m.formatDate(event.date))+' · '+s(event.title)+(event.actor?' · '+s(m.byPerson(event.actor)?.name||event.actor):'')+'</li>').join('')+'</ul></details>':'')+
     '<div class="form-error wide" role="alert" hidden></div></div>'+modalFoot(task?'Сохранить задачу':'Создать задачу',task?'check':'plus')+'</form>','task',{id,clientId});
   toggleOutcome();
 }
+function followUpFields(){
+  const day=m.today();
+  return '<div id="next-contact-date" class="field-group" hidden>'+
+    field('Следующий контакт',input('followUp',m.shiftDate(day,1),'date','min="'+day+'" required'))+
+    field('Время повторного звонка',input('followUpTime','','time'))+'</div>';
+}
 function quickContact(id,taskId='',assigned=''){
   const client=m.byClient(state,id);
-  const task=state.tasks.find(item=>item.id===taskId);
-  if(!client)return;
-  const day=m.today();
-  const assignee=assigned||task?.assignee||mine()||m.people.find(p=>p.branch===client.branch)?.id;
-  const active=state.opportunities.find(item=>item.clientId===id&&isOpen(item));
-  const options=[['','Выберите результат'],['booked','Записался'],['callback','Просит перезвонить'],
-    ['no_answer','Не ответил'],['contacted','Есть интерес'],['declined','Отказался']];
   const fromClient=modal?.type==='client'&&dialog.open;
+  const task=taskId?state.tasks.find(item=>item.id===taskId):
+    fromClient?m.queue(state,{assignee:mine(),status:'open'}).find(item=>item.clientId===id):null;
+  if(!client||client.callBlocked||client.invalidPhone)return;
+  const assignee=assigned||task?.assignee||mine()||defaultAssignee(client.branch);
+  const active=state.opportunities.find(item=>item.clientId===id&&isOpen(item));
+  const options=[['','Выберите результат'],...Object.entries(m.outcomes)];
   present(modalHead('Результат контакта',client.name+' · '+m.formatPhone(client.phone))+
     '<form id="quick-contact-form"><div class="modal-body form-grid">'+
     (task?'<div class="contact-reference wide">'+icon('checkList',17)+'<span>'+s(task.title)+'</span></div>':'')+
     outcomeFields({planned:active?.planned,service:active?.service||m.lastKnownVisit(state,client).service},options)+
-    '<div id="next-contact-date" class="field-group" hidden>'+
-    field('Следующий контакт',input('followUp',m.shiftDate(day,1),'date','min="'+day+'" required'))+'</div>'+
-    field('Ответственный',select('assignee',m.people.filter(p=>p.branch).map(p=>[p.id,p.name]),assignee,true),'wide')+
+    followUpFields()+
+    field('Ответственный',select('assignee',assignees().map(p=>[p.id,p.name]),assignee,true),'wide')+
     field('Комментарий','<textarea name="note" maxlength="1200" rows="2" placeholder="Договорённости"></textarea>','wide')+
-    '<div class="form-error wide" role="alert" hidden></div></div>'+modalFoot('Сохранить')+'</form>','contact',{id,taskId,fromClient});
+    '<div class="form-error wide" role="alert" hidden></div></div>'+modalFoot('Сохранить')+'</form>','contact',{id,taskId:task?.id||'',fromClient});
   toggleOutcome();
 }
 function batchModal(){
   const branch=ui.branch||person().branch||m.branches[0].id;
-  const assignee=m.people.find(p=>p.branch===branch)?.id;
+  const assignee=defaultAssignee(branch);
   const day=m.today();
   present(modalHead('Назначить обзвон')+'<form id="batch-form"><div class="modal-body form-grid">'+
     field('Филиал',select('branch',m.branches.map(b=>[b.id,b.label]),branch,true))+
-    field('Ответственный',select('assignee',m.people.filter(p=>p.branch).map(p=>[p.id,p.name]),assignee,true))+
-    field('Клиенты',select('group',[['focus','Все, кто требует внимания'],['lost','Не были 90+ дней'],['attention','Не были 45–89 дней'],['unknown','Дата визита неизвестна']],'focus',true),'wide')+
+    field('Ответственный','<span class="select-control"><select name="assignee" required></select>'+icon('chevron',15)+'</span>')+
+    field('Клиенты',select('group',[['focus','Все, кто требует внимания'],...categoryOptions(segmentKeys)],'focus',true),'wide')+
     field('Максимум задач',select('count',[['10','10'],['25','25'],['50','50']],'10',true))+
-    field('Срок',input('due',day,'date','required min="'+day+'"'))+
+    field('Срок',input('due',m.shiftDate(day,m.settingsFor(state).rules.taskDays),'date','required min="'+day+'"'))+
     '<output class="batch-summary wide" id="batch-count" role="status"></output><div class="form-error wide" role="alert" hidden></div>'+
     '</div>'+modalFoot('Назначить задачи','plus')+'</form>','batch');
+  dialog.querySelector('#batch-form').elements.assignee.value=assignee||'';
   batchPreview();
 }
 function batchPreview(){
   const form=dialog.querySelector('#batch-form');
-  const {branch,group,count}=form.elements;
+  const {branch,group,count,assignee}=form.elements;
+  assignee.innerHTML=opts(assignees().filter(p=>m.assignedBranches(p).includes(branch.value)).map(p=>[p.id,p.name]),assignee.value);
   const size=Math.min(Number(count.value),m.availableForContact(state,branch.value,group.value).length);
   form.querySelector('#batch-count').textContent='Будет назначено задач: '+m.number(size);
-  form.querySelector('[type="submit"]').disabled=!size;
+  form.querySelector('[type="submit"]').disabled=!size||!assignee.value;
 }
 function quickSearch(){
   present(modalHead('Поиск клиента')+
@@ -620,7 +746,7 @@ function dealModal(id='',clientId='',nextStage=''){
   const available=state.clients.filter(c=>(!ui.branch||c.branch===ui.branch)&&
     !state.opportunities.some(item=>item.clientId===c.id&&isOpen(item)&&(!newBooking||item.stage==='booked')))
     .sort((a,b)=>a.name.localeCompare(b.name,'ru'));
-  const assignee=deal?.assignee||mine()||m.people.find(p=>p.branch===(client?.branch||ui.branch))?.id||m.people[0].id;
+  const assignee=deal?.assignee||mine()||defaultAssignee(client?.branch||ui.branch)||assignees()[0]?.id;
   const options=Object.entries(stages).filter(([key])=>deal?.stage!=='paid'||key==='paid').map(([key,value])=>[key,value.label]);
   const clientField=client
     ? '<input type="hidden" name="clientId" value="'+s(client.id)+'">'
@@ -632,7 +758,7 @@ function dealModal(id='',clientId='',nextStage=''){
   present(modalHead(newBooking?'Добавить запись':nextStage==='paid'?'Визит и оплата':deal?'Этап воронки':'Добавить в воронку',client?.name||'Выберите клиента и задайте следующий шаг.')+
     '<form id="deal-form"><div class="modal-body form-grid">'+clientField+
     field('Этап',select('stage',options,nextStage||deal?.stage||'contact',true))+
-    field('Ответственный',select('assignee',m.people.filter(p=>p.branch).map(p=>[p.id,p.name]),assignee,true))+
+    field('Ответственный','<span class="select-control"><select name="assignee" required></select>'+icon('chevron',15)+'</span>')+
     field('Услуга',input('service',deal?.service||client?.service,'text','maxlength="120" placeholder="Например, маникюр с покрытием"'))+planned+
     group('outreach',field('Срок следующего шага',input('due',due,'date')))+
     group('visit',field('Дата визита',input('visitDate',deal?.visitDate||day,'date','required'))+
@@ -682,8 +808,11 @@ function toggleOutcome(){
   form.elements.plannedInput.disabled=!booked;
   const next=dialog.querySelector('#next-contact-date');
   if(next){
-    next.hidden=!result.value||booked||result.value==='declined';
+    const historical=modal?.type==='task'&&state.tasks.some(task=>task.id===modal.id&&task.status==='done'&&task.result===result.value);
+    next.hidden=!selected||!result.value||terminalResults.has(result.value)||historical;
     form.elements.followUp.disabled=next.hidden;
+    form.elements.followUpTime.disabled=next.hidden;
+    form.elements.followUpTime.required=!next.hidden&&result.value==='callback';
     form.elements.appointment.min=m.today();
   }
 }
@@ -692,15 +821,17 @@ function updatePreview(){
   ui.importPreview=null;
   ui.importError='';
   if(!ui.importFile)return;
-  try {ui.importPreview=previewRows(ui.importFile.rows,state.clients,ui.fallback,ui.importFile);}
+  try {ui.importPreview=previewRows(ui.importFile.rows,state.clients,ui.fallback,{...ui.importFile,mapping:ui.importMapping,branches:m.branches,demoOnly:demoMode});}
   catch(err){ui.importError=err.message;}
 }
 async function handleFile(file){
   if(!file||ui.importBusy)return;
-  ui.importBusy=true;ui.importError='';ui.importFile=null;ui.importPreview=null;
+  ui.importBusy=true;ui.importError='';ui.importFile=null;ui.importLayout=null;ui.importMapping=null;ui.importPreview=null;
   render();
   try{
     const data=await readFile(file);
+    ui.importLayout=detectColumns(data.rows);
+    ui.importMapping={...ui.importLayout.mapping};
     ui.importFile={...data,name:file.name};
     updatePreview();
   }catch(err){ui.importError=err.message||'Файл не удалось прочитать.';}
@@ -711,15 +842,18 @@ async function commitImport(){
   ui.importBusy=true;
   render();
   try{
-    const {added,duplicates}=await run({type:'import-clients',clients:ui.importPreview.records,filename:ui.importFile.name});
+    const {added,updated,duplicates,conflicts}=await run({type:'import-clients',clients:ui.importPreview.records,filename:ui.importFile.name});
     ui.importFile=null;
+    ui.importLayout=null;
+    ui.importMapping=null;
     ui.importPreview=null;
-    notify('Добавлено клиентов: '+m.number(added)+(duplicates?' · Уже в базе: '+m.number(duplicates):''));
+    go('clients',{segment:'focus'});
+    notify('Добавлено: '+m.number(added)+' · обновлено: '+m.number(updated)+(duplicates?' · без изменений: '+m.number(duplicates):'')+(conflicts?' · конфликты: '+m.number(conflicts):''));
   }catch(err){ui.importError='Сохранение не удалось. '+err.message;}
   finally{ui.importBusy=false;render();}
 }
 function downloadSample(){
-  const url=URL.createObjectURL(new Blob([sampleCsv],{type:'text/csv;charset=utf-8'}));
+  const url=URL.createObjectURL(new Blob([demoCsv(m.branches)],{type:'text/csv;charset=utf-8'}));
   const link=document.createElement('a');
   link.href=url;link.download='glamour-шаблон-импорта.csv';link.click();
   setTimeout(()=>URL.revokeObjectURL(url),1000);
@@ -756,14 +890,22 @@ document.addEventListener('click',event=>{
     }
     case 'open-branch': ui.branch=id;savePrefs();go('clients');break;
     case 'profile': profileModal();break;
-    case 'switch-profile': ui.profile=id;ui.branch=id==='manager'?'':m.byPerson(id).branch;savePrefs();closeModal();go(id==='manager'?'analytics':'home');notify('Выбран профиль: '+person().name);break;
+    case 'switch-profile': {
+      if(serverMode||!m.byPerson(id,rawState))break;
+      ui.profile=id;ui.branch='';useSnapshot(rawState);savePrefs();closeModal();go(manager()?'analytics':'home');break;
+    }
+    case 'logout': void logout();break;
     case 'client': clientModal(id);break;
     case 'new-task': taskModal('',id);break;
     case 'edit-task': taskModal(id);break;
     case 'call': quickContact(id);break;
     case 'quick-contact': quickContact(id,element.dataset.task||'',element.dataset.assignee||'');break;
     case 'quick-search': quickSearch();break;
-    case 'batch': batchModal();break;
+    case 'batch': if(manager())batchModal();break;
+    case 'reset-demo':
+      if(manager()&&demoMode)present(modalHead('Сбросить демоданные?','Импортированные записи, задачи и настройки демо будут заменены исходными.')+
+        '<form id="reset-form"><div class="modal-body"><div class="form-error" role="alert" hidden></div></div>'+modalFoot('Сбросить')+'</form>','reset');
+      break;
     case 'home-filter': ui.homeFilter=id;ui.homeLimit=8;render();break;
     case 'more-contacts': ui.homeLimit+=8;render();break;
     case 'new-booking': dealModal('','','booked');break;
@@ -792,21 +934,32 @@ document.addEventListener('input',event=>{
 });
 document.addEventListener('change',event=>{
   const field=event.target;
+  if(field.dataset.map){
+    if(field.value==='')delete ui.importMapping[field.dataset.map];
+    else ui.importMapping[field.dataset.map]=Number(field.value);
+    updatePreview();render(true);
+    document.querySelector('.mapping-panel')?.setAttribute('open','');
+    return;
+  }
   if(field.id==='import-file'){void handleFile(field.files[0]);return;}
   if(dialog.contains(field)){
     if(field.form?.id==='batch-form'){
-      if(field.name==='branch')field.form.elements.assignee.value=m.people.find(p=>p.branch===field.value).id;
       batchPreview();
     }
     if(field.name==='status'||field.name==='result')toggleOutcome();
     if(field.name==='stage')toggleDealFields();
+    if(field.name==='clientId'&&['task-form','deal-form'].includes(field.form?.id)&&manager()){
+      const client=m.byClient(state,field.value);
+      const assignee=field.form.elements.assignee;
+      if(!m.assignedBranches(m.byPerson(assignee.value)).includes(client?.branch))assignee.value=defaultAssignee(client?.branch)||'';
+    }
     if(field.name==='clientId'&&modal.newBooking){
       const booking=state.opportunities.find(deal=>deal.clientId===field.value&&isOpen(deal));
       const client=m.byClient(state,field.value);
       const elements=field.form.elements;
       elements.service.value=booking?.service||client?.service||'';
       elements.plannedInput.value=moneyInput(booking?.planned);
-      elements.assignee.value=booking?.assignee||mine()||m.people.find(p=>p.branch===client?.branch)?.id||m.people[0].id;
+      elements.assignee.value=booking?.assignee||mine()||defaultAssignee(client?.branch)||assignees()[0]?.id;
     }
     return;
   }
@@ -861,9 +1014,12 @@ dialog.addEventListener('submit',async event=>{
       await run({type:'record-contact',clientId:current.id,taskId:current.taskId,values:data});
       if(current.fromClient)clientModal(current.id);
       else closeModal();
-      const message=data.result==='booked'?'Клиент записан':data.result==='declined'?'Результат сохранён':
+      const message=data.result==='booked'?'Клиент записан':terminalResults.has(data.result)?'Результат сохранён':
         'Следующий контакт: '+m.formatDate(data.followUp);
       notify(message);
+    }
+    if(current.type==='reset'){
+      await run({type:'reset-demo'});closeModal();go('home');notify('Демоданные восстановлены');
     }
     if(current.type==='batch'){
       const result=await run({type:'assign-outreach',...data,count:Number(data.count)});
@@ -878,6 +1034,13 @@ dialog.addEventListener('submit',async event=>{
   }
 });
 
+app.addEventListener('submit',submitMain);
 applyTheme();
-try {state=await repository.read();render();}
+try {
+  if(serverMode){
+    account=(await repository.session()).user;
+    if(account){ui.profile=account.id;useSnapshot(await repository.read());if(!location.hash&&manager())ui.page='analytics';render();}
+    else renderLogin();
+  }else{useSnapshot(await repository.read());if(!location.hash&&manager())ui.page='analytics';render();}
+}
 catch {app.innerHTML='<div class="boot" role="alert">Не удалось открыть хранилище. Проверьте разрешения браузера и перезагрузите страницу.</div>';}
